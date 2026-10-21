@@ -65,7 +65,7 @@ Item {
   readonly property bool panelBorderEnabled: v2Shell
     ? presentation.panelBorder !== false : borderEnabled
   readonly property bool shadowEnabled: presentation.shadow === true
-  readonly property bool frostEnabled: !v2Shell && presentation.frost === true
+  readonly property bool frostEnabled: false
   readonly property color paper: Commons.Color.background
   readonly property color ink: Commons.Color.foreground
   readonly property color sumi: Commons.Color.muted
@@ -73,13 +73,13 @@ Item {
   readonly property color seal: stateService
     ? stateService.selectedColor : Commons.Color.bar.active
   readonly property color mutedInk: sumi
-  readonly property color pill: Qt.rgba(paper.r, paper.g, paper.b, 0.18)
-  readonly property color barBackground: Qt.rgba(paper.r, paper.g, paper.b,
-    frostEnabled ? 0.68 : 0.94)
-  readonly property color panelBackground: Qt.rgba(paper.r, paper.g, paper.b, 0.94)
-  readonly property color pillBorder: mix(paper, ink, 0.13)
-  readonly property color islandBorder: mix(paper, ink, 0.16)
-  readonly property color shellBorder: mix(paper, ink, 0.22)
+  readonly property color pill: Qt.rgba(paper.r, paper.g, paper.b, 1.0)
+  // 100% solid, fully opaque bar background without transparency.
+  readonly property color barBackground: Qt.rgba(paper.r, paper.g, paper.b, 1.0)
+  readonly property color panelBackground: Qt.rgba(paper.r, paper.g, paper.b, 1.0)
+  readonly property color pillBorder: Qt.rgba(seal.r, seal.g, seal.b, 0.35)
+  readonly property color islandBorder: Qt.rgba(seal.r, seal.g, seal.b, 0.35)
+  readonly property color shellBorder: Qt.rgba(seal.r, seal.g, seal.b, 0.35)
   readonly property color pillShadow: Qt.rgba(0, 0, 0, 0.55)
   readonly property int pillBorderWidth: borderEnabled ? 1 : 0
   readonly property color panelBorder: pillBorder

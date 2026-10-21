@@ -146,7 +146,7 @@ class PackageReleaseTests(unittest.TestCase):
             },
             "public-beta.14.1": {
                 "suiteVersion": "0.1.1-beta.14.1",
-                "sourceRevisions": ["package:0.1.1-beta.14.1"],
+                "sourceRevisions": ["package:0.1.1-beta.14.1", "7a6c853b1947d303bad9a5b640c224c01b669106"],
                 "settingsStorageVersion": 1,
                 "payloadDigest": "0350a8f66d81dc640b6d268ace149620ae78c40aea13ad2cd507ad6de93d8de3",
             },

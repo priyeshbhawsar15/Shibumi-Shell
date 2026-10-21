@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Effects
 import QtQuick.Shapes
+import qs.Commons as Commons
 
 Item {
   id: root
@@ -11,6 +12,11 @@ Item {
   property var runs: []
   property string screenName: ""
   property real screenX: 0
+  // Dynamic-Island-style expansion: 0 = collapsed pill, 1 = fully expanded.
+  // Driven by BarSurface's hover state so the notch itself grows seamlessly
+  // from the screen edge instead of a second popup appearing below it.
+  property real nowPlayingExpandProgress: 0
+  property Component nowPlayingExpandedContent: null
   readonly property string shellStyle:
     ["shibumi", "full", "fit", "dock", "notch"]
       .indexOf(String(bar.visualTokens.shellStyle || "")) >= 0
@@ -89,27 +95,157 @@ Item {
   Repeater {
     model: root.shellStyle === "shibumi" ? root.runs : []
 
-    delegate: Rectangle {
+    delegate: Item {
+      id: run
       required property var modelData
+      // In V1, the run spanning the screen midpoint is the center group.
+      // Its silhouette follows an Apple-style notch: broad at the screen edge,
+      // curved inward through the shoulder, then straight through its body.
+      readonly property bool centerNotch: root.shellStyle === "shibumi" && root.atTop
+        && Number(modelData.x || 0) <= root.width / 2
+        && Number(modelData.x || 0) + Number(modelData.width || 0) >= root.width / 2
+      readonly property real topLift: centerNotch
+        ? root.bar.visualTokens.islandOffsetY : 0
+      // The notch itself is intentionally constrained; a run can span the
+      // entire bar when adjacent V1 sections merge, but the notch must not.
+      readonly property real collapsedNotchWidth: Math.min(300,
+        Math.max(210, width - 2 * root.bar.visualTokens.islandInsetX))
+      readonly property real expandedNotchWidth: 320
+      readonly property real expandProgress: centerNotch
+        ? root.nowPlayingExpandProgress : 0
+      readonly property real notchWidth: centerNotch
+        ? collapsedNotchWidth + (expandedNotchWidth - collapsedNotchWidth) * expandProgress
+        : width
+      readonly property real collapsedNotchHeight: run.height
+      readonly property real expandedNotchHeight: collapsedNotchHeight + 300
+      readonly property real notchHeight: centerNotch
+        ? collapsedNotchHeight + (expandedNotchHeight - collapsedNotchHeight) * expandProgress
+        : run.height
+      readonly property real bodyInset: centerNotch ? 12 : 0
+      readonly property real bottomTaper: centerNotch ? 3.5 * (1 - expandProgress) : 0
+      readonly property real shoulderDepth: centerNotch ? 13 : 0
+      readonly property real bottomRadius: centerNotch
+        ? (14 + 6 * expandProgress) : 0
       x: Number(modelData.x || 0)
-      y: 0
+      y: -topLift
       width: Math.max(0, Number(modelData.width || 0))
-      height: root.height
-      radius: Math.min(height / 2, root.bar.visualTokens.islandRadius)
-      color: root.bar.background
-      border.width: root.bar.visualTokens.pillBorderWidth
-      border.color: root.bar.visualTokens.islandBorder
+      height: root.height + topLift
 
-      RectangularShadow {
+      Rectangle {
         anchors.fill: parent
-        visible: root.bar.visualTokens.shadowEnabled === true
-        radius: parent.radius
-        blur: 8
-        spread: 0
-        offset: Qt.vector2d(0, root.atTop ? 1 : -1)
-        color: root.bar.visualTokens.pillShadow !== undefined
-          ? root.bar.visualTokens.pillShadow : Qt.rgba(0, 0, 0, 0.55)
-        z: -1
+        visible: !parent.centerNotch
+        radius: Math.min(height / 2, root.bar.visualTokens.islandRadius)
+        color: root.bar.background
+        border.width: root.bar.visualTokens.pillBorderWidth
+        border.color: root.bar.visualTokens.islandBorder
+
+        RectangularShadow {
+          anchors.fill: parent
+          visible: root.bar.visualTokens.shadowEnabled === true
+          radius: parent.radius
+          blur: 8
+          spread: 0
+          offset: Qt.vector2d(0, root.atTop ? 1 : -1)
+          color: root.bar.visualTokens.pillShadow !== undefined
+            ? root.bar.visualTokens.pillShadow : Qt.rgba(0, 0, 0, 0.55)
+          z: -1
+        }
+      }
+
+      Shape {
+        id: notchSurface
+        x: Math.round((run.width - width) / 2)
+        y: 0
+        width: run.notchWidth
+        height: run.notchHeight
+        visible: run.centerNotch
+        antialiasing: true
+        preferredRendererType: Shape.CurveRenderer
+
+        readonly property color themeAccent: (root.bar && root.bar.urgent)
+          ? root.bar.urgent
+          : (root.bar && root.bar.visualTokens && root.bar.visualTokens.seal
+            ? root.bar.visualTokens.seal : Commons.Color.bar.active)
+
+        RectangularShadow {
+          anchors.fill: parent
+          visible: run.expandProgress > 0.02
+          radius: run.bottomRadius
+          blur: 22
+          spread: 0
+          offset: Qt.vector2d(0, 6)
+          color: Qt.rgba(notchSurface.themeAccent.r, notchSurface.themeAccent.g, notchSurface.themeAccent.b, 0.25 * run.expandProgress)
+          z: -1
+        }
+
+        ShapePath {
+          strokeColor: (run.expandProgress > 0.02)
+            ? Qt.rgba(notchSurface.themeAccent.r, notchSurface.themeAccent.g, notchSurface.themeAccent.b, 0.50)
+            : (root.bar.visualTokens.pillBorderWidth > 0
+              ? root.bar.visualTokens.islandBorder
+              : Qt.rgba(notchSurface.themeAccent.r, notchSurface.themeAccent.g, notchSurface.themeAccent.b, 0.25))
+          strokeWidth: 1
+          fillColor: Commons.Color.background
+          capStyle: ShapePath.FlatCap
+          joinStyle: ShapePath.RoundJoin
+          startX: 0
+          startY: 0
+          PathLine { x: notchSurface.width; y: 0 }
+          PathCubic {
+            x: notchSurface.width - run.bodyInset
+            y: run.shoulderDepth
+            // S-curve shoulder: tangent stays flat at top, then rounds smoothly into the vertical body
+            control1X: notchSurface.width - run.bodyInset * 0.44
+            control1Y: 0
+            control2X: notchSurface.width - run.bodyInset
+            control2Y: run.shoulderDepth * 0.56
+          }
+          PathLine {
+            x: notchSurface.width - run.bodyInset - run.bottomTaper
+            y: notchSurface.height - run.bottomRadius
+          }
+          PathQuad {
+            x: notchSurface.width - run.bodyInset - run.bottomTaper - run.bottomRadius
+            y: notchSurface.height
+            controlX: notchSurface.width - run.bodyInset - run.bottomTaper
+            controlY: notchSurface.height
+          }
+          PathLine {
+            x: run.bodyInset + run.bottomTaper + run.bottomRadius
+            y: notchSurface.height
+          }
+          PathQuad {
+            x: run.bodyInset + run.bottomTaper
+            y: notchSurface.height - run.bottomRadius
+            controlX: run.bodyInset + run.bottomTaper
+            controlY: notchSurface.height
+          }
+          PathLine { x: run.bodyInset; y: run.shoulderDepth }
+          PathCubic {
+            x: 0
+            y: 0
+            control1X: run.bodyInset
+            control1Y: run.shoulderDepth * 0.56
+            control2X: run.bodyInset * 0.44
+            control2Y: 0
+          }
+        }
+      }
+
+      // Expanded now-playing content: fades in as the notch grows, filling
+      // the space the shape opens up below the collapsed pill row.
+      Loader {
+        id: nowPlayingContentLoader
+        active: run.centerNotch && root.nowPlayingExpandedContent !== null
+          && run.expandProgress > 0.001
+        x: notchSurface.x + run.bodyInset
+        y: run.collapsedNotchHeight
+        width: notchSurface.width - run.bodyInset * 2
+        height: Math.max(0, run.notchHeight - run.collapsedNotchHeight)
+        opacity: Math.max(0, (run.expandProgress - 0.35) / 0.65)
+        clip: true
+        sourceComponent: root.nowPlayingExpandedContent
+        visible: height > 4
       }
     }
   }

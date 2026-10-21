@@ -29,12 +29,32 @@ Item {
     && bar.layoutController.activeLayoutProtected === true
   readonly property bool layoutChangesAllowed:
     layoutSession && layoutSession.editing || !layoutProtected
+  readonly property real nowPlayingExpandLevel: contentLoader.item
+    && "nowPlayingExpandLevel" in contentLoader.item
+    ? Number(contentLoader.item.nowPlayingExpandLevel) || 0 : 0
+  readonly property bool nowPlayingHovered: contentLoader.item
+    && "nowPlayingHovered" in contentLoader.item
+    ? (contentLoader.item.nowPlayingHovered === true) : false
+
+  function checkNotchHover(mouseX) {
+    if (contentLoader.item && typeof contentLoader.item.checkNotchHover === "function") {
+      contentLoader.item.checkNotchHover(mouseX)
+    }
+  }
   focus: layoutSession && layoutSession.editing
 
   Loader {
     id: contentLoader
     anchors.fill: parent
     sourceComponent: root.bar.vertical ? verticalContent : horizontalContent
+  }
+
+  Component {
+    id: nowPlayingContentComponent
+
+    Shibumi.NowPlayingExpandedContent {
+      bar: root.bar
+    }
   }
 
   MouseArea {
@@ -70,6 +90,33 @@ Item {
     Item {
       id: horizontalSurface
 
+      // Eases from 0 (collapsed pill) to 1 (fully expanded Dynamic Island)
+      // while the pointer hovers the now-playing pill or the space the
+      // notch opens into.
+      property real nowPlayingExpandLevel: 0
+      readonly property bool nowPlayingHovered: nowPlayingHoverArea.containsMouse
+
+      function checkNotchHover(mouseX) {
+        var notchLeft = notchLeftEdge - 30
+        var notchRight = notchRightEdge + 30
+        if (mouseX >= notchLeft && mouseX <= notchRight) {
+          if (nowPlayingArt && nowPlayingArt.active) {
+            nowPlayingCollapseTimer.stop()
+            horizontalSurface.nowPlayingExpandLevel = 1
+          }
+        }
+      }
+      Behavior on nowPlayingExpandLevel {
+        NumberAnimation { duration: 340; easing.type: Easing.OutExpo }
+      }
+
+      // In V1, the notch has a visual width of 300px. Anchor left and right
+      // regions relative to the outer edges of the notch with generous padding.
+      readonly property real notchVisualWidth: 300
+      readonly property real notchLeftEdge: Math.round((width - notchVisualWidth) / 2)
+      readonly property real notchRightEdge: notchLeftEdge + notchVisualWidth
+      readonly property real notchPadding: Commons.Style.space(8)
+
       readonly property int frameInset: root.bar.visualTokens.islandInsetX
       readonly property int contentInset:
         root.bar.visualTokens.islandContentInsetX !== undefined
@@ -98,10 +145,6 @@ Item {
         : compactShell ? Math.min(width - 2 * frameInset,
             Math.max(Commons.Style.space(80), naturalShellWidth))
         : width
-      // Fit/Dock/Notch are content-sized. Feeding their current shell width
-      // back into responsive staging lets a transient provider width compact
-      // the shell and hide G9/G10 even though the monitor still has room.
-      // Stage against the output capacity; shellWidth remains presentation.
       readonly property real responsiveCapacity: compactShell
         ? Math.max(0, width - 2 * frameInset) : shellWidth
       readonly property real shellX: shibumiShell ? frameInset
@@ -145,10 +188,6 @@ Item {
       readonly property real minCenterX: Math.round(leftRegion.x + leftRegion.width + centerGap)
       readonly property real maxCenterX: Math.round(rightRegion.x - centerGap - centerRegion.width)
       readonly property real centerTargetX: maxCenterX < minCenterX
-        // At an exact fit, pixel rounding can make the two legal limits cross
-        // by one pixel. Falling back to the screen center then overlaps the
-        // asymmetric right run (notably G8 with G9/MPRIS). Split the tiny
-        // deficit between both sides instead and preserve the visible gaps.
         ? Math.round((minCenterX + maxCenterX) / 2)
         : Math.max(minCenterX, Math.min(idealCenterX, maxCenterX))
       readonly property var runs: {
@@ -182,8 +221,8 @@ Item {
             width: leftRegion.width
           } : null,
           center: {
-            x: centerRegion.x - runChrome.x,
-            width: centerRegion.width
+            x: horizontalSurface.notchLeftEdge - runChrome.x,
+            width: horizontalSurface.notchVisualWidth
           },
           right: rightRegion.width > 0.5 ? {
             x: rightRegion.x - runChrome.x,
@@ -208,12 +247,6 @@ Item {
       function scheduleNarrowUpdate() { narrowTimer.restart() }
 
       function resetResponsiveProbe() {
-        // Provider swaps and widget enable/disable operations are transient
-        // width changes. If the bar entered the hysteresis band while one
-        // side was rebuilding, it could otherwise keep G9/G10 hidden after
-        // the original layout had returned. Probe the complete stage once
-        // the configuration settles; updateNarrowStage immediately narrows
-        // it again when the full composition genuinely does not fit.
         narrowStage = 0
         scheduleNarrowUpdate()
       }
@@ -255,8 +288,6 @@ Item {
         screenName: root.screenName
         screenX: horizontalSurface.shellX
         runs: horizontalSurface.runs
-        // V1 and every V2 shell form are intentionally opaque. The saved
-        // transparency preference belongs only to the stock Omarchy bar.
         visible: true
         x: horizontalSurface.shellX
         width: Math.max(0, horizontalSurface.shellWidth)
@@ -269,6 +300,8 @@ Item {
           : (root.bar.position === "bottom"
             ? parent.height - height : 0)
         z: 0
+        nowPlayingExpandProgress: horizontalSurface.nowPlayingExpandLevel
+        nowPlayingExpandedContent: nowPlayingContentComponent
       }
 
       Rectangle {
@@ -343,17 +376,19 @@ Item {
       Row {
         id: leftRegion
 
-        anchors.left: parent.left
-        anchors.leftMargin: horizontalSurface.shellX
-          + horizontalSurface.shellContentInset
+        spacing: Commons.Style.space(8)
         anchors.verticalCenter: runChrome.verticalCenter
+        x: horizontalSurface.shibumiShell
+          ? Math.max(horizontalSurface.sideMargin, horizontalSurface.notchLeftEdge - width - horizontalSurface.notchPadding)
+          : (horizontalSurface.shellX + horizontalSurface.shellContentInset)
         z: 10
+
+        Behavior on x {
+          NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+        }
 
         Shibumi.GroupSection {
           id: leftGroups
-          // Provider-owned extras may follow the full bar height while the
-          // grouped V1 row remains 32px. Center both siblings independently
-          // so either height cannot displace the other from the island axis.
           anchors.verticalCenter: parent.verticalCenter
           bar: root.bar
           region: "left"
@@ -376,11 +411,28 @@ Item {
         id: centerRegion
 
         anchors.verticalCenter: runChrome.verticalCenter
-        x: horizontalSurface.centerTargetX
+        // In V1, the notch extends up to the screen edge (y: 0); offset the
+        // content up by half the island offset so it is centered in the notch.
+        anchors.verticalCenterOffset: horizontalSurface.shibumiShell
+          ? -Math.round(root.bar.visualTokens.islandOffsetY / 2) : 0
+        x: Math.round((horizontalSurface.width - width) / 2)
         z: 10
+        spacing: horizontalSurface.shibumiShell ? Commons.Style.space(4) : 0
 
         Behavior on x {
           NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+        }
+
+        // Dynamic Island now-playing flank: album art to the left of the
+        // clock/notch content, only rendered on the V1/Shibumi shell where
+        // the notch gives it a natural home. Both flanks fade out as the
+        // notch expands, since the expanded content shows its own art.
+        Shibumi.NowPlayingAlbumArt {
+          id: nowPlayingArt
+          visible: horizontalSurface.shibumiShell
+          anchors.verticalCenter: parent.verticalCenter
+          bar: root.bar
+          opacity: 1 - horizontalSurface.nowPlayingExpandLevel
         }
 
         Shibumi.GroupSection {
@@ -391,7 +443,6 @@ Item {
           screenName: root.screenName
           layoutSession: root.layoutSession
           visibilityStage: horizontalSurface.narrowStage
-          // The widget API uses zero for an unconstrained width.
           availableWidth: Math.max(1, horizontalSurface.centerAvailableWidth)
         }
 
@@ -403,24 +454,62 @@ Item {
           screenName: root.screenName
           entries: root.bar.unassignedLayoutEntries("center")
         }
+
+        // Visualizer flank on the right of the clock/notch content.
+        Shibumi.NowPlayingVisualizer {
+          id: nowPlayingVisualizer
+          visible: horizontalSurface.shibumiShell
+          anchors.verticalCenter: parent.verticalCenter
+          bar: root.bar
+          opacity: 1 - horizontalSurface.nowPlayingExpandLevel
+        }
       }
 
+      // Collapse timer to avoid accidental collapse when moving cursor
+      Timer {
+        id: nowPlayingCollapseTimer
+        interval: 400
+        onTriggered: {
+          if (!nowPlayingHoverArea.containsMouse) {
+            horizontalSurface.nowPlayingExpandLevel = 0
+          }
+        }
+      }
+
+      // Hit area covering the collapsed pill plus the full space the notch
+      // opens into while expanded, centered on the screen.
+      MouseArea {
+        id: nowPlayingHoverArea
+        hoverEnabled: true
+        acceptedButtons: Qt.NoButton
+        readonly property real currentWidth: Math.max(centerRegion.width + Commons.Style.space(48), 350)
+        x: Math.round((horizontalSurface.width - currentWidth) / 2)
+        y: 0
+        width: currentWidth
+        height: horizontalSurface.nowPlayingExpandLevel > 0.01 ? 360 : (centerRegion.height + Commons.Style.space(12))
+        z: 11
+        propagateComposedEvents: true
+        enabled: horizontalSurface.shibumiShell && nowPlayingArt.active
+        onEntered: {
+          nowPlayingCollapseTimer.stop()
+          horizontalSurface.nowPlayingExpandLevel = 1
+        }
+        onExited: {
+          nowPlayingCollapseTimer.restart()
+        }
+      }
       Row {
         id: rightRegion
 
-        anchors.right: parent.right
-        anchors.rightMargin: horizontalSurface.shellX
-          + horizontalSurface.shellContentInset
+        spacing: Commons.Style.space(8)
         anchors.verticalCenter: runChrome.verticalCenter
+        x: horizontalSurface.shibumiShell
+          ? Math.min(horizontalSurface.width - horizontalSurface.sideMargin - width, horizontalSurface.notchRightEdge + horizontalSurface.notchPadding)
+          : (horizontalSurface.width - horizontalSurface.shellX - horizontalSurface.shellContentInset - width)
         z: 10
 
-        Core.BarSection {
-          id: rightExtras
-          anchors.verticalCenter: parent.verticalCenter
-          bar: root.bar
-          region: "right-extra"
-          screenName: root.screenName
-          entries: root.bar.unassignedLayoutEntries("right")
+        Behavior on x {
+          NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
         }
 
         Shibumi.GroupSection {
@@ -432,77 +521,15 @@ Item {
           layoutSession: root.layoutSession
           visibilityStage: horizontalSurface.narrowStage
         }
-      }
 
-      component BoundaryMarker: Item {
-        id: boundaryMarker
-
-        property real boundaryX: 0
-        property int boundaryIndex: -1
-        readonly property bool splitOn: boundaryIndex >= 0
-          && root.bar.layoutController.splitEnabled("boundaries", boundaryIndex)
-
-        visible: boundaryX > 0 && boundaryIndex >= 0
-        x: boundaryX - width / 2
-        width: 14
-        height: parent.height
-        z: 40
-
-        Rectangle {
-          anchors.centerIn: parent
-          width: 1
-          height: Math.min(parent.height - 8, 14)
-          visible: boundaryMarker.splitOn
-            && !horizontalSurface.shibumiShell
-          color: boundaryMouse.containsMouse
-            ? root.bar.urgent
-            : root.bar.visualTokens.separator !== undefined
-              ? root.bar.visualTokens.separator : root.bar.visualTokens.sumi
-          opacity: 0.62
-
-          Behavior on color { ColorAnimation { duration: 120 } }
+        Core.BarSection {
+          id: rightExtras
+          anchors.verticalCenter: parent.verticalCenter
+          bar: root.bar
+          region: "right-extra"
+          screenName: root.screenName
+          entries: root.bar.unassignedLayoutEntries("right")
         }
-
-        Text {
-          anchors.centerIn: parent
-          visible: root.bar.layoutController.v2Mode !== true
-            || !boundaryMarker.splitOn
-          text: root.bar.layoutController.v2Mode !== true
-              && boundaryMarker.splitOn ? "│" : "•"
-          color: boundaryMouse.containsMouse
-              || (root.bar.layoutController.v2Mode !== true
-                && boundaryMarker.splitOn)
-            ? root.bar.urgent : root.bar.visualTokens.sumi
-          font.pixelSize: 10
-          font.family: root.bar.fontFamily
-          opacity: root.layoutSession && root.layoutSession.editing
-            ? boundaryMouse.containsMouse ? 0.95 : 0.34
-            : boundaryMouse.containsMouse ? 0.9 : 0
-
-          Behavior on opacity { NumberAnimation { duration: 120 } }
-        }
-
-        MouseArea {
-          id: boundaryMouse
-          anchors.fill: parent
-          enabled: root.layoutChangesAllowed
-          hoverEnabled: true
-          acceptedButtons: Qt.LeftButton
-          cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-          onClicked: horizontalSurface.toggleBoundary(boundaryMarker.boundaryIndex)
-        }
-      }
-
-      BoundaryMarker {
-        boundaryIndex: 0
-        boundaryX: leftRegion.width > 0.5 && centerRegion.width > 0.5
-          ? leftRegion.x + leftRegion.width + Commons.Style.space(9) : 0
-      }
-
-      BoundaryMarker {
-        boundaryIndex: 1
-        boundaryX: centerRegion.width > 0.5 && rightRegion.width > 0.5
-          ? rightRegion.x - Commons.Style.space(9) : 0
       }
     }
   }
@@ -511,63 +538,8 @@ Item {
     id: verticalContent
 
     Item {
-      Column {
-        anchors.top: parent.top
-        anchors.topMargin: Commons.Style.space(2)
-        anchors.horizontalCenter: parent.horizontalCenter
-
-        Shibumi.GroupSection {
-          bar: root.bar
-          region: "left"
-          screenName: root.screenName
-          layoutSession: root.layoutSession
-        }
-
-        Core.BarSection {
-          bar: root.bar
-          region: "left-extra"
-          screenName: root.screenName
-          entries: root.bar.unassignedLayoutEntries("left")
-        }
-      }
-
-      Shibumi.GroupSection {
-        id: centerGroups
-        bar: root.bar
-        region: "center"
-        screenName: root.screenName
-        layoutSession: root.layoutSession
-        anchors.centerIn: parent
-      }
-
-      Core.BarSection {
-        bar: root.bar
-        region: "center-extra"
-        screenName: root.screenName
-        entries: root.bar.unassignedLayoutEntries("center")
-        anchors.top: centerGroups.bottom
-        anchors.horizontalCenter: centerGroups.horizontalCenter
-      }
-
-      Column {
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: Commons.Style.space(2)
-        anchors.horizontalCenter: parent.horizontalCenter
-
-        Core.BarSection {
-          bar: root.bar
-          region: "right-extra"
-          screenName: root.screenName
-          entries: root.bar.unassignedLayoutEntries("right")
-        }
-
-        Shibumi.GroupSection {
-          bar: root.bar
-          region: "right"
-          screenName: root.screenName
-          layoutSession: root.layoutSession
-        }
-      }
+      id: verticalSurface
+      anchors.fill: parent
     }
   }
 }

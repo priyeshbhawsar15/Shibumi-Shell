@@ -107,6 +107,7 @@ Item {
   readonly property bool requestedTransparent: false
   readonly property bool transparent: false
   property bool barToggledOff: false
+  property bool barAutohideEnabled: false
   property bool barToggleStateLoaded: false
   property bool barHiddenProbeQueued: false
   readonly property bool barHiddenProbeBusy:
@@ -3508,10 +3509,12 @@ Item {
   Process {
     id: barHiddenProbe
     running: root.hostReady
-    command: ["bash", "-lc", "[[ -f $HOME/.local/state/omarchy/toggles/bar-off ]] && echo yes || echo no"]
+    command: ["bash", "-lc", "echo -n \"off:\"; [[ -f $HOME/.local/state/omarchy/toggles/bar-off ]] && echo -n yes || echo -n no; echo -n \",auto:\"; [[ -f $HOME/.local/state/omarchy/toggles/bar-autohide ]] && echo yes || echo no"]
     stdout: SplitParser {
       onRead: line => {
-        root.barToggledOff = String(line).trim() === "yes"
+        const str = String(line).trim()
+        root.barToggledOff = str.indexOf("off:yes") >= 0
+        root.barAutohideEnabled = str.indexOf("auto:yes") >= 0
         root.barToggleStateLoaded = true
       }
     }

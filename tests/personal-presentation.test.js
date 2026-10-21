@@ -1,0 +1,15 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const src = fs.readFileSync(path.join(__dirname, '../hancore.shibumi.state/ShibumiConfig.js'), 'utf8').replace('.pragma library', '');
+const normalize = new Function(src + '\nreturn normalize;')();
+assert.equal(normalize({version: 1, presentation: {mainMonitorDescription: 'Main display'}}).presentation.mainMonitorDescription, 'Main display');
+assert.equal(normalize({version: 1, presentation: {mainMonitorDescription: 7}}).presentation.mainMonitorDescription, '');
+const policy = fs.readFileSync(path.join(__dirname, '../hancore.shibumi.bar/core/MonitorPolicy.js'), 'utf8').replace('.pragma library', '');
+const secondary = new Function(policy + '\nreturn typeof isSecondaryMonitor === "function" ? isSecondaryMonitor : () => false;')();
+const screens = [{name: 'DP-6', description: 'Main display'}, {name: 'DP-5', description: 'Side display'}];
+assert.equal(secondary(screens, 'DP-5', 'Main display'), true);
+assert.equal(secondary(screens, 'DP-6', 'Main display'), false);
+assert.equal(secondary([{name: 'DP-5', description: 'Side display'}], 'DP-5', 'Main display'), false);
+assert.equal(secondary(screens, 'DP-5', ''), false);
+console.log('personal presentation settings passed');

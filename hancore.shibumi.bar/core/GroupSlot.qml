@@ -2,7 +2,10 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import QtQuick.Effects
+import Quickshell.Hyprland
+import qs.Commons as Commons
 import "GroupRegistry.js" as GroupRegistry
+import "MonitorPolicy.js" as PersonalConfig
 
 Item {
   id: root
@@ -43,7 +46,24 @@ Item {
       : stateConfig.widgets
         ? stateConfig.widgets[effectiveGroupId] || ({}) : ({})
   }
+  readonly property string dynamicModuleId:
+    GroupRegistry.dynamicModuleIdForGroup(effectiveGroupId)
+  readonly property bool dynamicV1Group: !v2Shell && dynamicModuleId !== ""
+
+  readonly property bool isSideMonitor: {
+    const name = String(root.screenName || "")
+    if (name === "") return false
+    const monitors = Hyprland.monitors ? (Hyprland.monitors.values || []) : []
+    return PersonalConfig.isSecondaryMonitor(monitors, name,
+      String((stateConfig.presentation || {}).mainMonitorDescription || ""))
+  }
+
   readonly property bool groupEnabled: {
+    if (isSideMonitor && groupId !== "G2" && groupId !== "G8"
+        && dynamicModuleId !== "mmsbrggr.per-monitor-workspaces"
+        && effectiveGroupId !== "G:mmsbrggr.per-monitor-workspaces") {
+      return false
+    }
     // Calls across the plugin-service boundary do not reliably retain nested
     // config dependencies. Observe the published config/revision explicitly
     // so an optional group enabled after startup actually creates its slot.
@@ -55,9 +75,6 @@ Item {
             effectiveGroupId, v2Shell ? "v2" : "v1")
         : groupSettings.enabled !== false
   }
-  readonly property string dynamicModuleId:
-    GroupRegistry.dynamicModuleIdForGroup(effectiveGroupId)
-  readonly property bool dynamicV1Group: !v2Shell && dynamicModuleId !== ""
   // These optional suite widgets already own a native PillSurface. Keep the
   // compatibility wrapper only for external dynamic widgets so inherited and
   // custom fills both composite exactly once.
@@ -155,28 +172,13 @@ Item {
       : root.bar.visualTokens
         && root.bar.visualTokens.tileRadius !== undefined
         ? root.bar.visualTokens.tileRadius : 0
-    opacity: root.dynamicV1Group ? 1 : root.bar.visualTokens
-      && typeof root.bar.visualTokens.widgetSurfaceOpacity === "function"
-      ? root.bar.visualTokens.widgetSurfaceOpacity(root.groupSettings) : 1
-    color: root.dynamicV1Group && root.bar.visualTokens
-      && root.bar.visualTokens.pill !== undefined
-      ? root.bar.visualTokens.pill : root.appearanceFill
-      && typeof root.bar.visualTokens.widgetFillColor === "function"
-      ? root.bar.visualTokens.widgetFillColor(root.groupSettings)
-      : "transparent"
-    border.width: root.dynamicV1Group && root.bar.visualTokens
-      && root.bar.visualTokens.pillBorderWidth !== undefined
-      ? root.bar.visualTokens.pillBorderWidth
-      : root.appearanceBorder && root.bar.visualTokens
-      && typeof root.bar.visualTokens.widgetBorderWidth === "function"
-      ? root.bar.visualTokens.widgetBorderWidth(root.groupSettings)
-      : root.appearanceBorder ? 1 : 0
-    border.color: root.dynamicV1Group && root.bar.visualTokens
-      && root.bar.visualTokens.pillBorder !== undefined
-      ? root.bar.visualTokens.pillBorder : root.appearanceBorder
-      && typeof root.bar.visualTokens.widgetBorderColor === "function"
-      ? root.bar.visualTokens.widgetBorderColor(root.groupSettings)
-      : "transparent"
+    opacity: 1
+    color: Commons.Color.background
+    border.width: 1
+    border.color: root.bar && root.bar.visualTokens
+      && root.bar.visualTokens.islandBorder !== undefined
+      ? root.bar.visualTokens.islandBorder
+      : Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.16)
 
     Loader {
       id: dynamicShadowLoader
@@ -284,19 +286,33 @@ Item {
     id: verticalContent
 
     Item {
+      id: verticalRoot
       readonly property bool hasLoadedWidgets: root
-        ? root.anyLoadedWidget(moduleRepeater) : false
-      implicitWidth: moduleColumn.childrenRect.width
-      implicitHeight: moduleColumn.childrenRect.height
+        ? root.anyLoadedWidget(verticalModuleRepeater) : false
+
+      readonly property real minimumResponsiveWidth: {
+        void(verticalModuleColumn.implicitHeight)
+        var maxVal = 0
+        for (var i = 0; i < verticalModuleRepeater.count; i++) {
+          var item = verticalModuleRepeater.itemAt(i)
+          if (item)
+            maxVal = Math.max(maxVal, Number(item["minimumResponsiveWidth"]) || 0)
+        }
+        return maxVal
+      }
+
+      implicitWidth: verticalModuleColumn.childrenRect.width
+      implicitHeight: verticalModuleColumn.childrenRect.height
 
       Column {
-        id: moduleColumn
+        id: verticalModuleColumn
 
         Repeater {
-          id: moduleRepeater
+          id: verticalModuleRepeater
           model: root.moduleIds
           WidgetSlot {
             required property string modelData
+            required property int index
             bar: root.bar
             entry: root.resolvedEntry(modelData)
             hostEntry: GroupRegistry.hostEntryFor(
@@ -307,6 +323,7 @@ Item {
             region: root.groupId
             screenName: root.screenName
             availableWidth: root.availableWidth
+            horizontalHostHeight: 0
           }
         }
       }

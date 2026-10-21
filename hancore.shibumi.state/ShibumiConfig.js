@@ -113,9 +113,11 @@ function defaultPresentationConfig() {
     radius: "large",
     accent: "color01",
     shellStyle: "shibumi",
-    v2ShellStyle: "full"
+    v2ShellStyle: "full",
+    mainMonitorDescription: ""
   }
 }
+
 
 function defaultWorkspaceConfig() {
   return {
@@ -367,6 +369,9 @@ function normalizePresentation(value) {
     result.panelBorder = value.panelBorder
   if (typeof value.shadow === "boolean") result.shadow = value.shadow
   if (typeof value.frost === "boolean") result.frost = value.frost
+  if (typeof value.mainMonitorDescription === "string"
+      && value.mainMonitorDescription.length <= MaxWidgetStringLength)
+    result.mainMonitorDescription = value.mainMonitorDescription
   if (["large", "small"].indexOf(String(value.radius || "")) !== -1)
     result.radius = String(value.radius)
   if (paletteIdValid(value.accent))

@@ -504,6 +504,9 @@ def command_install(
     paths: RuntimePaths,
     runtime: OmarchyRuntime,
 ) -> int:
+    user_layout = bool(getattr(args, "user_layout", False))
+    if user_layout and args.no_activate:
+        raise CliError("--user-layout activates the bundled bar; do not combine with --no-activate")
     if args.no_activate != args.keep_layout:
         raise CliError(
             "--no-activate and --keep-layout must be used together"
@@ -574,8 +577,8 @@ def command_install(
             revision,
             payload_digest,
             plugin_digests,
-            activation_mode="external" if external else "managed",
-            layout_policy="preserved" if external else "managed",
+            activation_mode="external" if external or user_layout else "managed",
+            layout_policy="preserved" if external or user_layout else "managed",
             configured_bar=configured_bar_id(desired),
             previous_bar=current.get("bar"),
         )
@@ -886,7 +889,7 @@ def command_repair(
     validate_sources(runtime, specs)
     current, _ = read_config(paths.config_file, paths.defaults_file)
     defaults, _ = read_config(paths.defaults_file, paths.defaults_file)
-    external = external_activation(state, current)
+    external = external_activation(state, current) or bool(getattr(args, "keep_layout", False))
     retired_installed = set(state["plugins"]) & set(suite.retired_plugins)
     current_installed = set(state["plugins"]) - retired_installed
     def desired_for(config: dict[str, Any]) -> dict[str, Any]:
@@ -1052,8 +1055,9 @@ def command_activate(
             # managed bar must never snapshot Shibumi as its own predecessor.
             activated_state["previousBar"] = copy.deepcopy(current_bar)
         activation = activated_state.setdefault("activation", {})
-        activation["mode"] = "managed"
-        activation["layoutPolicy"] = "managed"
+        user_layout = bool(getattr(args, "user_layout", False))
+        activation["mode"] = "external" if user_layout else "managed"
+        activation["layoutPolicy"] = "preserved" if user_layout else "managed"
         activation["configuredBar"] = configured_bar_id(desired)
         activated_state["updatedEpoch"] = int(time.time())
         transaction.finish(activated_state, archive_previous=False)
@@ -1403,6 +1407,8 @@ def parser() -> argparse.ArgumentParser:
     )
     install.add_argument("--dry-run", action="store_true")
     install.add_argument("--yes", "-y", action="store_true")
+    install.add_argument("--user-layout", action="store_true",
+                         help="activate the bundled bar with user-owned widget layout")
 
     migrate = subparsers.add_parser(
         "migrate", help="migrate a suite-managed QS Rise install to Shibumi"
@@ -1425,6 +1431,8 @@ def parser() -> argparse.ArgumentParser:
     )
     repair.add_argument("--dry-run", action="store_true")
     repair.add_argument("--yes", "-y", action="store_true")
+    repair.add_argument("--keep-layout", action="store_true",
+                        help="repair admitted payload while retaining the user-owned bar layout")
     repair.add_argument(
         "--allow-downgrade",
         action="store_true",
@@ -1436,6 +1444,8 @@ def parser() -> argparse.ArgumentParser:
     )
     activate.add_argument("--dry-run", action="store_true")
     activate.add_argument("--yes", "-y", action="store_true")
+    activate.add_argument("--user-layout", action="store_true",
+                          help="activate the bundled bar with user-owned widget layout")
 
     deactivate = subparsers.add_parser(
         "deactivate",

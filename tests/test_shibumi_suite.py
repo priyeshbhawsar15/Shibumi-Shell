@@ -1021,11 +1021,11 @@ class SuiteLifecycleTests(unittest.TestCase):
         )
 
     def test_mutated_beta141_package_identity_is_rejected(self) -> None:
+        packaged_suite = self.packaged_suite()
         drift_path = self.source / "hancore.shibumi.bar/Bar.qml"
         payload = drift_path.read_bytes()
         replacement = b" " if payload[-1:] != b" " else b"\n"
         drift_path.write_bytes(payload[:-1] + replacement)
-        packaged_suite = self.packaged_suite()
 
         with self.assertRaisesRegex(
             AdmissionError, "exact declared revision identity"
@@ -1161,6 +1161,15 @@ class SuiteLifecycleTests(unittest.TestCase):
         atomic_write(self.paths.config_file, encode_config(config))
 
     def packaged_suite(self, version: str = "0.1.1-beta.14.1") -> Suite:
+        # A fork must not pretend its modified payload is the historical public
+        # package. Build this compatibility fixture from the actual upstream pin.
+        plugins = sorted(self.suite.plugins)
+        archive = subprocess.check_output(['git', '-C', str(REPO_ROOT), 'archive',
+            '--format=tar', '7a6c853b1947d303bad9a5b640c224c01b669106', '--', *plugins])
+        for identity in plugins:
+            shutil.rmtree(self.source / identity)
+        with tarfile.open(fileobj=io.BytesIO(archive)) as packed:
+            packed.extractall(self.source, filter='data')
         metadata_path = self.source / "PACKAGE-METADATA.json"
         shutil.copy2(REPO_ROOT / "packaging/package-metadata.json", metadata_path)
         suite_contract_path = self.source / "contracts/plugin-suite-v1.json"
