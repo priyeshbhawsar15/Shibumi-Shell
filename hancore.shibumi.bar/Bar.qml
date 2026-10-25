@@ -63,6 +63,12 @@ Item {
     && SuiteRuntime.Runtime.isActiveBar(root)
     && injectionComplete && hostReady && !shutdownPrepared
     && barConfig && barConfig.id === "hancore.shibumi.bar"
+  Services.GamingPause {
+    id: gamingPause
+    enabled: root.visibilityIpcReady
+  }
+  readonly property bool gameDecorationsPaused: gamingPause.paused
+
   property bool outputWindowsEnabled: true
   // No-output fixtures can opt out while the deployed scoped Bar performs
   // the one process-bound native registry prime before becoming visible.
@@ -3364,6 +3370,11 @@ Item {
         "hancore.shibumi.status", String(screenName || ""))
       return widget && typeof widget.open === "function" && widget.open()
         ? "ok" : "not-ready"
+    }
+
+    function gamingDecorationState(): string {
+      return JSON.stringify({ watching: root.visibilityIpcReady,
+        paused: root.gameDecorationsPaused })
     }
 
     function debugWidgetPipeline(): string {

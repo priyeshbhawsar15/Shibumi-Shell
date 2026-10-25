@@ -791,6 +791,22 @@ Use screenshots and Quickshell logs as evidence. Record the exact Omarchy
 version, output geometry, scale, source commit, and any physical state that
 could not be exercised.
 
+## Gaming-aware decorative media pause
+
+Run `python3 tests/gaming-visualizer-regression.py` (optionally set `OMARCHY_PATH` to the
+host whose Commons/Ui modules should be used). It launches only an offscreen fixture in
+an exact temporary home/config/state/runtime, addresses fixture-private IPC by its child
+PID, and terminates/reaps that child before deleting temporary files. It never probes,
+signals, restarts or mutates the production shell.
+
+The fixture exercises actual visualizer heights and file creation, atomic replacement,
+deletion/recreation, opt-out, malformed/oversized/foreign-session/versioned hints, owner
+revocation/readmission and hidden-bar behavior. Playback remains logically Playing and
+geometry remains stable while the decorative animation is stopped. This is component
+logic/lifecycle evidence, not physical multi-monitor rendering or a GPU/FPS benchmark.
+Live acceptance must separately verify the active Bar, all physical outputs, real media
+playback, preserved controls and before/after resource/frame-time measurements.
+
 ## Hardware and output gates
 
 Fixtures prove deterministic unavailable, degraded, and error states. They do

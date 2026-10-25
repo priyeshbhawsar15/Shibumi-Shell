@@ -17,6 +17,10 @@ Item {
   readonly property bool active: !!(activePlayer
     && (activePlayer.trackTitle || activePlayer.trackArtist))
   readonly property bool playing: active && activePlayer.isPlaying === true
+  readonly property bool decorationsPaused: !!(bar && "gameDecorationsPaused" in bar
+    && bar.gameDecorationsPaused === true)
+  readonly property bool animating: playing && !decorationsPaused && visible
+    && !(bar && "barHidden" in bar && bar.barHidden === true)
 
   readonly property color themeAccent: (bar && bar.urgent)
     ? bar.urgent
@@ -28,6 +32,7 @@ Item {
   implicitHeight: Math.max(12, (bar ? bar.barSize : 28) - 16)
 
   Behavior on implicitWidth {
+    enabled: !root.decorationsPaused
     NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
   }
 
@@ -57,7 +62,7 @@ Item {
         }
 
         SequentialAnimation {
-          running: root.playing
+          running: root.animating
           loops: Animation.Infinite
           NumberAnimation {
             target: vBar; property: "height"

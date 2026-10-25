@@ -56,6 +56,35 @@ The legacy `setWidgetAppearance` IPC method remains available only for the
 group-wide `separator` boolean. It returns `variant-required` for scoped
 appearance keys instead of writing an ignored top-level fallback.
 
+### Gaming-aware media visualization
+
+The V1 decorative media visualizer becomes static while a compatible desktop gaming
+controller requests it; audio playback, player state, media controls, colors and geometry
+are unchanged. Normal animations resume when the request ends. Hidden bars also stop
+this decorative loop.
+
+This integration is optional and read-only. The admitted Bar owns one event-driven
+watcher, shared by every output, for
+`$XDG_STATE_HOME/omarchy/gaming-mode/session.json` (default
+`~/.local/state/omarchy/gaming-mode/session.json`). The producer owns its lifecycle.
+The supported journal hint is:
+
+```json
+{"schemaVersion":1,"signature":"current HYPRLAND_INSTANCE_SIGNATURE","pauseDecorations":true}
+```
+
+Only a version-1 object with an exact current nonempty Hyprland signature and literal
+boolean `pauseDecorations: true` pauses the loop. Other fields are ignored. Missing,
+malformed, oversized (over 64 KiB of text), foreign-session and unsupported-version hints
+leave normal behavior enabled. Removal/atomic replacement and Bar ownership revocation
+are handled without polling, subprocesses, MPRIS commands or new platform backends. The
+hint is a same-user local presentation input, not an authentication/security boundary.
+It does not add persistent Shibumi configuration or a new plugin to the 24-plugin suite.
+
+`omarchy-shell shibumi-suite gamingDecorationState` reports the admitted watcher's active
+and paused flags. An arch-setups producer can opt out through its own
+`pauseDecorations: false` setting; the consumer never modifies that setting or the journal.
+
 ### V1 layout slots
 
 V1 keeps seven base slots on the left, one in the center, and seven on the
