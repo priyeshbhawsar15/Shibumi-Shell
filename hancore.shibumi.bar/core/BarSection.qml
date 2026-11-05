@@ -12,6 +12,8 @@ Item {
   property string region: ""
   property string screenName: ""
   property var entries: []
+  // Zero means unconstrained, as it does for WidgetSlot.
+  property real availableWidth: 0
   readonly property Item contentItem: content.item
   readonly property var stateService: bar && bar.shell
     && typeof bar.shell.serviceFor === "function"
@@ -81,6 +83,7 @@ Item {
             anchors.centerIn: parent
             bar: root.bar
             entry: slotItem.modelData
+            availableWidth: root.availableWidth
             region: root.region
             screenName: root.screenName
           }
@@ -122,6 +125,7 @@ Item {
             anchors.centerIn: parent
             bar: root.bar
             entry: vSlotItem.modelData
+            availableWidth: root.availableWidth
             region: root.region
             screenName: root.screenName
           }

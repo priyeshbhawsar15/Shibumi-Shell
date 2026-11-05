@@ -157,13 +157,13 @@ Item {
       // The notch keeps its width whatever it holds, so its content has to fit
       // inside its curved edges and beside any now-playing art and visualizer.
       readonly property real notchContentWidth: Math.max(0,
-        notchVisualWidth - 2 * notchBodyInset - centerExtras.width
+        notchVisualWidth - 2 * notchBodyInset
         - nowPlayingArt.implicitWidth - nowPlayingVisualizer.implicitWidth
         - (nowPlayingArt.visible ? centerRegion.spacing : 0)
         - (nowPlayingVisualizer.visible ? centerRegion.spacing : 0))
       readonly property real notchBodyInset: 12
       readonly property real centerAvailableWidth: shibumiShell
-        ? notchContentWidth
+        ? Math.max(0, notchContentWidth - centerExtras.width)
         : ResponsiveLayout.centerAvailableWidth(compactShell, width,
           frameInset, shellContentInset, leftRegion.width, rightRegion.width,
           centerGap, measuredCenterSpan, centerExtras.width)
@@ -462,6 +462,10 @@ Item {
           region: "center-extra"
           screenName: root.screenName
           entries: root.bar.unassignedLayoutEntries("center")
+          // Not less the center groups' width: that width follows the budget
+          // above, which already gives way to these widgets.
+          availableWidth: horizontalSurface.shibumiShell
+            ? horizontalSurface.notchContentWidth : 0
         }
 
         // Visualizer flank on the right of the clock/notch content.

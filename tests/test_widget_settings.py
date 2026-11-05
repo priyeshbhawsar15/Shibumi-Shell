@@ -31,6 +31,16 @@ class WidgetSettingsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("widget settings smoke passed", output)
 
+    def test_center_extra_widgets_are_told_the_room_inside_the_notch(self) -> None:
+        # A center widget outside G8, such as a calendar, renders through
+        # BarSection, so the notch's width has to reach it there as well.
+        section = (ROOT / "hancore.shibumi.bar/core/BarSection.qml").read_text()
+        self.assertIn("property real availableWidth: 0", section)
+        self.assertEqual(section.count("availableWidth: root.availableWidth"), 2)
+        surface = (ROOT / "hancore.shibumi.bar/styles/shibumi/BarSurface.qml").read_text()
+        extras = surface[surface.index("id: centerExtras"):]
+        self.assertIn("availableWidth: horizontalSurface.shibumiShell", extras[:400])
+
 
 if __name__ == "__main__":
     unittest.main()
