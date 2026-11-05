@@ -154,8 +154,17 @@ Item {
           ? root.bar.visualTokens.shellWingWidth : 0)
       readonly property real measuredCenterSpan: Math.max(0,
         rightRegion.x - (leftRegion.x + leftRegion.width) - 2 * centerGap)
-      readonly property real centerAvailableWidth:
-        ResponsiveLayout.centerAvailableWidth(compactShell, width,
+      // The notch keeps its width whatever it holds, so its content has to fit
+      // inside its curved edges and beside any now-playing art and visualizer.
+      readonly property real notchContentWidth: Math.max(0,
+        notchVisualWidth - 2 * notchBodyInset - centerExtras.width
+        - nowPlayingArt.implicitWidth - nowPlayingVisualizer.implicitWidth
+        - (nowPlayingArt.visible ? centerRegion.spacing : 0)
+        - (nowPlayingVisualizer.visible ? centerRegion.spacing : 0))
+      readonly property real notchBodyInset: 12
+      readonly property real centerAvailableWidth: shibumiShell
+        ? notchContentWidth
+        : ResponsiveLayout.centerAvailableWidth(compactShell, width,
           frameInset, shellContentInset, leftRegion.width, rightRegion.width,
           centerGap, measuredCenterSpan, centerExtras.width)
       property int narrowStage: 0
