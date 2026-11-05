@@ -22,7 +22,8 @@ visibility nudge in an isolated HOME, proving both host-owned marker directions,
 delayed admission behind an outgoing stock handler, synchronous revocation
 before stock takeover, and rejection of duplicate target registration.
 The registry-prime regression uses the real exact-PID Quickshell IPC transport.
-It covers success, transport refusal, acknowledged timeout, post-prime Bar-owner
+It covers success, transport refusal, acknowledged timeout, a deadline timer that
+fires early, a replacement that arrives after the timeout, post-prime Bar-owner
 change, changed-process refusal, and scope loss/recovery. Every case remains
 fail-closed until a replacement owner is observed, dispatches at most one native
 rescan, and checks the exact bounded observation vocabulary, event cardinality,

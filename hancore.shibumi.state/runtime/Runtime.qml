@@ -46,6 +46,8 @@ QtObject {
   property double _hostRegistryPrimeStartedAtMs: 0
   property double _hostRegistryPrimeLastElapsedMs: 0
   property var _hostRegistryPrimeObservedPhases: []
+  property int _hostRegistryPrimeDeadlineRearms: 0
+  property bool _hostRegistryPrimeTimedOut: false
   // The warning budget is process-owned so output-local slots or a rebuilt Bar
   // cannot emit more than one passive exhaustion diagnostic.
   property bool hostWidgetResolutionWarningEmitted: false
@@ -162,6 +164,7 @@ QtObject {
     visibilityIpcHandoff.stop()
     visibilityIpcArmed = false
     hostRegistryPrimeDeadline.stop()
+    _hostRegistryPrimeTimedOut = false
     if (["dispatching", "acknowledged"].indexOf(
         hostRegistryPrimePhase) >= 0) {
       hostRegistryPrimePhase = "failed"
@@ -197,7 +200,7 @@ QtObject {
       "timed-out"]
     if (allowed.indexOf(phase) < 0
         || _hostRegistryPrimeObservedPhases.indexOf(phase) >= 0
-        || _hostRegistryPrimeObservedPhases.length >= 4) return
+        || _hostRegistryPrimeObservedPhases.length >= 5) return
     _hostRegistryPrimeObservedPhases = _hostRegistryPrimeObservedPhases.concat([phase])
     const measured = Math.floor(Date.now() - _hostRegistryPrimeStartedAtMs)
     const elapsed = Number.isFinite(measured)
@@ -212,7 +215,10 @@ QtObject {
   }
 
   function evaluateHostRegistryPrime() {
-    if (["dispatching", "acknowledged"].indexOf(
+    // A timeout only stops waiting. The replacement Bar is what the prime was
+    // waiting for, and without this a slow rescan hides the bar until restart.
+    const late = hostRegistryPrimePhase === "failed" && _hostRegistryPrimeTimedOut
+    if (!late && ["dispatching", "acknowledged"].indexOf(
         hostRegistryPrimePhase) < 0) return
     const lease = _selected("hancore.shibumi.bar")
     if (lease && lease.serial > _hostRegistryPrimeInitialSerial
@@ -223,10 +229,11 @@ QtObject {
         observeHostRegistryPrime("replacement-bar-observed")
       }
     }
-    if (!_hostRegistryPrimeAcknowledged
+    if ((!late && !_hostRegistryPrimeAcknowledged)
         || !_hostRegistryPrimeReplacementOwner || !lease
         || lease.owner !== _hostRegistryPrimeReplacementOwner) return
     hostRegistryPrimeDeadline.stop()
+    _hostRegistryPrimeTimedOut = false
     hostRegistryPrimePhase = "ready"
     hostRegistryPrimeRevision++
     observeHostRegistryPrime("ready")
@@ -236,11 +243,31 @@ QtObject {
     if (["dispatching", "acknowledged"].indexOf(
         hostRegistryPrimePhase) < 0) return
     hostRegistryPrimeDeadline.stop()
+    _hostRegistryPrimeTimedOut = timedOut === true
     hostRegistryPrimePhase = "failed"
     hostRegistryPrimeRevision++
     observeHostRegistryPrime(timedOut === true ? "timed-out" : "failed")
     if (hostRegistryPrimeProcess.running)
       hostRegistryPrimeProcess.running = false
+  }
+
+  // QML Timers follow Qt's animation clock rather than real time, and this one
+  // has fired 6.4 seconds early as the session lock engaged during startup. Wait
+  // out what really remains. The re-arm limit keeps the prime bounded if the
+  // system clock steps backwards meanwhile.
+  function hostRegistryPrimeDeadlineFired() {
+    if (["dispatching", "acknowledged"].indexOf(
+        hostRegistryPrimePhase) < 0) return
+    const remaining = hostRegistryPrimeTimeoutMs
+      - (Date.now() - _hostRegistryPrimeStartedAtMs)
+    if (remaining > 0 && _hostRegistryPrimeDeadlineRearms < 3) {
+      _hostRegistryPrimeDeadlineRearms++
+      hostRegistryPrimeDeadline.interval = Math.ceil(
+        Math.min(remaining, hostRegistryPrimeTimeoutMs))
+      hostRegistryPrimeDeadline.restart()
+      return
+    }
+    failHostRegistryPrime(true)
   }
 
   function requestHostRegistryPrime(owner, processId) {
@@ -381,7 +408,7 @@ QtObject {
   property Timer hostRegistryPrimeDeadline: Timer {
     interval: runtime.hostRegistryPrimeTimeoutMs
     repeat: false
-    onTriggered: runtime.failHostRegistryPrime(true)
+    onTriggered: runtime.hostRegistryPrimeDeadlineFired()
   }
 
   function validLease(lease) {

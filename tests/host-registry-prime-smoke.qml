@@ -114,8 +114,12 @@ ShellRoot {
         return
       }
       root.rescanCalls++
-      if (["success", "owner-change", "process-change", "diagnostic"]
-          .indexOf(root.mode) >= 0)
+      // A QML Timer can fire well before its interval, as seen when the session
+      // lock engaged during startup: it must not end the prime early.
+      if (root.mode === "early-deadline")
+        Shared.Runtime.hostRegistryPrimeDeadline.triggered()
+      if (["success", "owner-change", "process-change", "diagnostic",
+           "early-deadline"].indexOf(root.mode) >= 0)
         replacementTimer.restart()
       else if (root.mode === "scope-loss")
         scopeLossTimer.restart()
@@ -124,9 +128,12 @@ ShellRoot {
 
   Component.onCompleted: {
     if (["success", "refusal", "timeout", "owner-change",
-         "process-change", "scope-loss", "diagnostic"].indexOf(mode) < 0)
+         "process-change", "scope-loss", "diagnostic", "early-deadline",
+         "late-replacement"].indexOf(mode) < 0)
       fail("invalid SHIBUMI_PRIME_MODE")
-    Shared.Runtime.hostRegistryPrimeTimeoutMs = 300
+    // The early deadline needs a budget it cannot really exhaust before the
+    // replacement arrives, including the IPC client's own startup time.
+    Shared.Runtime.hostRegistryPrimeTimeoutMs = mode === "early-deadline" ? 3000 : 300
   }
 
   Timer {
@@ -166,8 +173,23 @@ ShellRoot {
         return
       }
 
+      // The prime really expires, and only then does the replacement arrive.
+      if (root.mode === "late-replacement" && root.stage === 2
+          && Shared.Runtime.hostRegistryPrimePhase === "failed") {
+        if (Shared.Runtime.hostRegistryPrimeReadyFor(
+              root.firstBar, Quickshell.processId)
+            || Shared.Runtime.requestHostRegistryPrime(
+              root.firstBar, Quickshell.processId))
+          return root.fail("the unreplaced Bar was admitted after the timeout")
+        replacementTimer.restart()
+        root.stage = 6
+        root.attempts = 0
+        return
+      }
+      if (root.mode === "late-replacement" && root.stage === 2) return
+
       const primeSucceeds = ["success", "owner-change", "process-change",
-        "diagnostic"].indexOf(root.mode) >= 0
+        "diagnostic", "early-deadline", "late-replacement"].indexOf(root.mode) >= 0
       if (primeSucceeds) {
         if (root.stage === 5) {
           if (!root.replacementBar

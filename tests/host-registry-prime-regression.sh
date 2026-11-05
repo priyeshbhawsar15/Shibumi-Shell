@@ -34,7 +34,7 @@ printf '%s\n' \
   > "$tmpdir/hancore.shibumi.state/.shibumi-managed.json"
 
 mode_index=0
-for mode in success refusal timeout owner-change process-change scope-loss diagnostic; do
+for mode in success refusal timeout owner-change process-change scope-loss diagnostic early-deadline late-replacement; do
   mode_index=$((mode_index + 1))
   # Keep Quickshell's derived Unix-domain IPC socket below sockaddr_un limits.
   runtime="$tmpdir/r$mode_index"
@@ -81,13 +81,17 @@ for mode in success refusal timeout owner-change process-change scope-loss diagn
 
   phase_sequence="${phases[*]-}"
   case "$mode" in
-    success|owner-change|process-change|diagnostic)
+    success|owner-change|process-change|diagnostic|early-deadline)
       [[ $phase_sequence == "request-accepted native-rescan-acknowledged replacement-bar-observed ready"
           || $phase_sequence == "request-accepted replacement-bar-observed native-rescan-acknowledged ready" ]] \
         || fail "$mode emitted the wrong bounded event sequence: $phase_sequence"
       ;;
     refusal)
       [[ $phase_sequence == "request-accepted native-rescan-refused failed" ]] \
+        || fail "$mode emitted the wrong bounded event sequence: $phase_sequence"
+      ;;
+    late-replacement)
+      [[ $phase_sequence == "request-accepted native-rescan-acknowledged timed-out replacement-bar-observed ready" ]] \
         || fail "$mode emitted the wrong bounded event sequence: $phase_sequence"
       ;;
     timeout)
