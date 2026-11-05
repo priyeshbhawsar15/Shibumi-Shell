@@ -195,6 +195,7 @@ class LifecycleAdmissionTests(unittest.TestCase):
             "source-beta.14",
             "public-beta.14.1",
             "fork-gaming-visualizer-pause",
+            "fork-registry-prime",
         ):
             identity = next(
                 item for item in self.identities if item["id"] == identity_id

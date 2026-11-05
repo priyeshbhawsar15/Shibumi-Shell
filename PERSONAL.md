@@ -21,7 +21,7 @@ Supported lifecycle additions:
 - `presentation.mainMonitorDescription` configures the full-controls output.
   Empty selection and single-output hosts retain accessible controls.
 
-Tests: `python3 -m unittest discover -s tests -p 'test_*.py'` (313 tests), and
+Tests: `python3 -m unittest discover -s tests -p 'test_*.py'` (314 tests), and
 `node tests/personal-presentation.test.js`. Historical public-package tests build
 that exact historical payload from Git rather than treating fork bytes as the
 upstream release. The package/production-boundary source checks are included in

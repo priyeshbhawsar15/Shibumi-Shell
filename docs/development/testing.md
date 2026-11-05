@@ -17,6 +17,9 @@ OMARCHY_PATH=/usr/share/omarchy ./tests/bar-host-registry-regression.sh
 ./tests/host-registry-prime-regression.sh
 ```
 
+`tests/test_widget_settings.py` proves a widget receives array settings as real
+arrays after they pass through a Repeater's `modelData`.
+
 The bar-host regression also exercises the process-singleton `omarchy.bar`
 visibility nudge in an isolated HOME, proving both host-owned marker directions,
 delayed admission behind an outgoing stock handler, synchronous revocation

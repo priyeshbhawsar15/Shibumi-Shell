@@ -6,6 +6,7 @@ import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
 import "core" as Core
+import "core/EntrySettings.js" as EntrySettings
 import "core/GroupRegistry.js" as GroupRegistry
 import "core/PanelRouting.js" as PanelRouting
 import "core/LayoutModel.js" as LayoutModel
@@ -1993,11 +1994,7 @@ Item {
 
   function entrySettings(entry) {
     if (!Util.isPlainObject(entry)) return ({})
-    const settings = ({})
-    for (const key in entry) {
-      if (key !== "id") settings[key] = entry[key]
-    }
-    return settings
+    return EntrySettings.fromEntry(entry)
   }
 
   function entryIndex(entries, id) {
