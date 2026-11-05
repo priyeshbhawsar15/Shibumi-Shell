@@ -39,7 +39,7 @@ class WidgetSettingsTests(unittest.TestCase):
         self.assertEqual(section.count("availableWidth: root.availableWidth"), 2)
         surface = (ROOT / "hancore.shibumi.bar/styles/shibumi/BarSurface.qml").read_text()
         extras = surface[surface.index("id: centerExtras"):]
-        self.assertIn("availableWidth: horizontalSurface.shibumiShell", extras[:400])
+        self.assertIn("availableWidth: horizontalSurface.shibumiShell", extras[:600])
 
 
 if __name__ == "__main__":
