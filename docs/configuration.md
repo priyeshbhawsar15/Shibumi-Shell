@@ -23,8 +23,9 @@ unavailable rather than silently falling back. The settings include:
   boundaries;
 - per-widget enabled state and appearance;
 - bar style and semantic accent;
-- V1 border, frost, shadow, and Radius 12/6 settings;
-- V2 bar-border and panel/tooltip-border settings;
+- V1 border, shadow, and Radius 12/6 settings;
+- V2 Bar border and Panels settings (Panels includes tooltip borders);
+- Frost transparency for V1 and V2 Notch;
 - workspace mode and presentation;
 - G1 launcher identity;
 - image and media picker styles;
@@ -37,6 +38,35 @@ Use the Control Center for normal changes. Manual JSON edits can be rejected or
 normalized when they violate the schema. Setters accept queued changes; only
 matching file readback confirms persistence. Unknown fields in the State entry,
 including nested settings, survive ordinary settings writes.
+
+### Frost and optional compositor blur
+
+**Bars → Frost** makes the V1 shell or V2 Notch translucent (alpha 0.68).
+It does not enable compositor blur. Full, Fit, and Dock retain their fixed
+shell shadows, which would mask the transparency, so they do not offer a
+Frost option. Notch remains shadowless. Saved Frost settings and panel
+surfaces remain unchanged.
+
+For optional background blur on Hyprland 0.56, add the following to your own
+Lua configuration after the defaults. This enables global blur and applies a
+layer rule only to the `shibumi-bar` namespace. Enabling global blur affects
+every transparent window, not just layers with other blur rules. The alpha
+threshold below excludes the transparent area outside the shell from layer
+blur. Shibumi does not install or change compositor rules.
+
+```lua
+hl.config({ decoration = { blur = { enabled = true } } })
+hl.layer_rule({
+    name = "shibumi-bar-blur",
+    match = { namespace = "^shibumi-bar$" },
+    blur = true,
+    ignore_alpha = 0.1,
+})
+```
+
+The fields are defined in the [Hyprland 0.56 Lua rule parser](https://github.com/hyprwm/Hyprland/blob/36b2e0cfe0c6094dbc47bd42a437431315bb3087/src/config/lua/bindings/LuaBindingsConfigRules.cpp)
+and its [configuration example](https://github.com/hyprwm/Hyprland/blob/36b2e0cfe0c6094dbc47bd42a437431315bb3087/example/hyprland.lua).
+This optional compositor effect is separate from Frost's transparency.
 
 ### Appearance IPC
 
@@ -93,8 +123,10 @@ up to two additional slots on each outer side and one in the center (two
 center positions total; default: G8 alone). The existing `+` appears in
 edit mode; adding the second position does not move G8. A saved one-position
 center stays unchanged until you explicitly add a slot. Only empty extra slots
-can be removed. The center has no internal divider; the existing section
-boundaries and split schema stay unchanged.
+can be removed. A two-position center exposes the same positional split marker,
+hit target, and spacing as the outer regions. Existing configurations without
+`splits.center` migrate it to a disabled boolean array matching the center order;
+the settings schema remains version 1.
 
 - `+` adds an empty slot up to nine positions per outer side or two in the center.
 - Dragging a group onto an occupied slot swaps the two groups; dragging it onto
@@ -103,9 +135,9 @@ boundaries and split schema stay unchanged.
   be removed.
 - A disabled, hardware-unavailable, or responsively hidden V1 group remains a
   compact proxy while editing, so its position can still be changed.
-- Outer splits remain positional. Adding or removing an outer slot changes
-  its split array in the same validated transaction. Center changes preserve
-  the existing split arrays and section boundaries.
+- Splits remain positional in all three regions. Adding or removing a slot
+  resizes that region's split array in the same validated transaction while
+  preserving the other regions and both section boundaries.
 - **Restore layout** returns V1 to its fixed `7 / 1 / 7` default and removes
   every extra position.
 
@@ -181,7 +213,7 @@ authoritative menu actions:
 - **Hearthstone** opens the Shibumi Hearthstone picker.
 
 During installation, Shibumi adds reversible overrides for Quattro's
-authoritative `style.theme` and `style.background` actions to the official
+authoritative `style.theme` / `style.background` (or `appearance.theme` / `appearance.background`) actions to the official
 user extension at `~/.config/omarchy/extensions/omarchy-menu.jsonc`. Existing
 user and plugin entries remain in place, updates are idempotent, and uninstall
 removes only the Shibumi-managed block. Shibumi does not patch Quattro,
@@ -192,10 +224,9 @@ Shibumi provider. If the quick-access service is unavailable, declines the
 request, or **Omarchy** is selected, routing falls back to the native Omarchy
 picker.
 
-Switching to the stock Omarchy bar resets the Theme & Wallpaper provider to
-**Omarchy** automatically. The Screenshots & Videos choice is independent and
-is retained. When Shibumi is activated again, Theme & Wallpaper remains on
-**Omarchy** until Tanzaku or Hearthstone is selected explicitly.
+`shibumi-suite deactivate` remembers the Theme & Wallpaper provider and selects **Omarchy** while the stock bar is active.
+`shibumi-suite activate` restores the remembered provider. Screenshots & Videos is independent and retained.
+`deactivate --keep-layout` continues to select **Omarchy** without remembering the provider.
 
 ## Bar ownership
 

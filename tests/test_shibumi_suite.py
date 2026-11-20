@@ -7,6 +7,9 @@ import json
 import io
 import os
 import re
+import runpy
+import select
+import signal
 import shutil
 import stat
 import subprocess
@@ -14,7 +17,8 @@ import sys
 import tarfile
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
+from importlib import import_module
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
@@ -22,20 +26,33 @@ from unittest.mock import Mock, patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CURRENT_VERSION = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+CURRENT_ID = f"public-{CURRENT_VERSION.split('-', 1)[-1]}"
+PUBLISHED_BETA141_REVISION = "7a6c853b1947d303bad9a5b640c224c01b669106"
+PUBLISHED_BETA15_REVISION = "4e91c26ebf4da07476d4be6176f29d7662fed9c1"
+PUBLISHED_BETA151_REVISION = "36e4b9f0de428c17248d40592461a9e3f3f750f8"
+PUBLISHED_BETA152_REVISION = "c45af77c8333b691ac36522247b6e5b5481a3666"
+PUBLISHED_BETA153_REVISION = "5b1d21f0cea73bb9e7997278a828b3ef295e6c94"
+PUBLISHED_BETA154_REVISION = "6594b989c9f5edfe557669b0413a9bd3e50f8e81"
+PUBLISHED_BETA16_REVISION = "4840482ec0e06a2ebd478120833d4fae1f30889e"
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from shibumi_suite.admission import (  # noqa: E402
     AdmissionError,
     JOURNAL_SCHEMA_VERSION,
     MAX_STATE_BYTES,
+    _bounded_plugin_payload_digest,
     preflight_lifecycle_state,
     require_current_payload_identity,
+    supported_install_identities,
 )
 from shibumi_suite.cli import (  # noqa: E402
     CliError,
+    CONTINUITY_PLUGIN_IDS,
     command_activate,
     command_deactivate,
     command_install,
+    install_picker_menu_extension,
     command_migrate,
     command_repair,
     command_status,
@@ -64,6 +81,7 @@ from shibumi_suite.model import (  # noqa: E402
 from shibumi_suite.menu_extension import (  # noqa: E402
     END_MARKER,
     START_MARKER,
+    _decoded,
     install_picker_routing,
     remove_picker_routing,
 )
@@ -76,6 +94,8 @@ from shibumi_suite.transaction import (  # noqa: E402
     recover_transactions,
 )
 
+
+drain_contract = import_module((__package__ + "." if __package__ else "") + "test_inc013_drain_contract")
 
 QUICKSHELL_EMPTY_REGISTRY = "No running instances.\n"
 SESSION_LOCK_FIELDS = (
@@ -103,6 +123,163 @@ INVALID_EMPTY_REGISTRY_OUTPUTS = (
     "null",
     "not-json\n",
 )
+
+
+BUG049_REACTIVATION_GUARD = """    return !!(row && row.id === id
+      && (row.enabled === false || (row.enabled === true
+        && !layoutStateController.v2Mode
+        && isV1AdditionalSuiteWidget(id) && !v1AdditionalWidgetPlaced(id)
+        && registeredWidgetComponent(id) !== null))
+      && Array.isArray(row.kinds) && row.kinds.indexOf("bar-widget") >= 0)
+"""
+
+
+def validate_bug049_static_contract(
+    bar_source: str, panel_source: str, resolver_source: str
+) -> None:
+    helper = """  function isV1AdditionalSuiteWidget(widgetId) {
+    return [
+      "hancore.shibumi.temperature",
+      "hancore.shibumi.gpu",
+      "hancore.shibumi.storage"
+    ].indexOf(String(widgetId || "")) >= 0
+  }
+"""
+    admission = """    if (!mutationAdmissionReady) return false
+    const id = String(widgetId || "")
+    if (!suiteHostShell.scoped || !layoutTransitionsSupported
+        || layoutTransitionBusy || providerSnapshotTransitionBusy
+        || stateTransitionBusy || !catalogObservation
+        || !LayoutModel.validPluginId(id)) return false
+    if (installed !== true) return layoutContains(id)
+"""
+    row_identity = """    const row = snapshot && snapshot.byId
+      && Object.prototype.hasOwnProperty.call(snapshot.byId, id)
+      ? snapshot.byId[id] : null
+"""
+    resolver = """  function registeredWidgetComponent(widgetId) {
+    return hostWidgetResolverService.componentFor(widgetId)
+  }
+"""
+    stale_observation = """    if (!canSetBarWidgetInstalled(id, installed)
+        || observationValue !== catalogObservation) return false
+"""
+    keep_configured = """      removeIds: removeIds, keepConfigured: installed !== true
+        && isV1AdditionalSuiteWidget(id),
+"""
+    for label, fragment in (
+        ("exact G16-G18 identity set", helper),
+        ("admission, busy, and disabled-path checks", admission),
+        ("catalog row identity", row_identity),
+        ("registered component resolver", resolver),
+        ("narrow enabled-row exception", BUG049_REACTIVATION_GUARD),
+        ("stale observation refusal", stale_observation),
+        ("neutral-entry retention", keep_configured),
+    ):
+        if bar_source.count(fragment) != 1:
+            raise AssertionError(f"Bug 049 static contract lost {label}")
+    if resolver_source.count("entry.metadata.pluginId === key") != 1:
+        raise AssertionError("Bug 049 component authority lost exact metadata identity")
+
+    branch_start = panel_source.index(
+        "        if (!v2LayoutActive\n"
+        "            && [\"G16\", \"G17\", \"G18\"].indexOf(group) >= 0) {"
+    )
+    branch_end = panel_source.index(
+        "        const alternativesInstalled", branch_start
+    )
+    branch = panel_source[branch_start:branch_end]
+    neutral_error = "The widget could not be added to the V1 layout."
+    capacity_error = (
+        "V1 has no free extension slot. Remove an active added plugin or free "
+        "a V1 extension slot under Bars."
+    )
+    if branch.count(neutral_error) + branch.count("panel.v1PlacementErrorMessage") != 1 or capacity_error in branch:
+        raise AssertionError("Bug 049 G16-G18 failure text is not neutral")
+    if panel_source.count(neutral_error) != 1 or panel_source.count(capacity_error) != 1:
+        raise AssertionError("Bug 049 changed failure text outside G16-G18")
+
+
+class Bug049StaticRegressionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.bar_source = (
+            REPO_ROOT / "hancore.shibumi.bar/Bar.qml"
+        ).read_text(encoding="utf-8")
+        cls.panel_source = (
+            REPO_ROOT / "hancore.shibumi.control-center/ControlCenterPanel.qml"
+        ).read_text(encoding="utf-8")
+        cls.resolver_source = (
+            REPO_ROOT
+            / "hancore.shibumi.bar/services/HostWidgetResolver.qml"
+        ).read_text(encoding="utf-8")
+
+    def mutated_bar(self, old: str, new: str) -> str:
+        self.assertEqual(self.bar_source.count(old), 1)
+        return self.bar_source.replace(old, new, 1)
+
+    def validate(self, bar_source: str, resolver_source: str | None = None) -> None:
+        validate_bug049_static_contract(
+            bar_source, self.panel_source, resolver_source or self.resolver_source
+        )
+
+    def test_product_sources_match_narrow_reactivation_contract(self) -> None:
+        self.validate(self.bar_source)
+
+    def test_reverted_enabled_guard_is_detected(self) -> None:
+        reverted = self.mutated_bar(
+            BUG049_REACTIVATION_GUARD,
+            """    return !!(row && row.id === id && row.enabled === false
+      && Array.isArray(row.kinds) && row.kinds.indexOf("bar-widget") >= 0)
+""",
+        )
+        with self.assertRaisesRegex(AssertionError, "narrow enabled-row exception"):
+            self.validate(reverted)
+
+    def test_missing_component_authority_is_detected(self) -> None:
+        weakened = self.mutated_bar(
+            "        && registeredWidgetComponent(id) !== null))\n",
+            "        && true))\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "narrow enabled-row exception"):
+            self.validate(weakened)
+
+    def test_wrong_component_metadata_identity_is_detected(self) -> None:
+        weakened = self.resolver_source.replace(
+            "entry.metadata.pluginId === key", "true", 1
+        )
+        with self.assertRaisesRegex(AssertionError, "exact metadata identity"):
+            self.validate(self.bar_source, weakened)
+
+    def test_missing_busy_admission_is_detected(self) -> None:
+        weakened = self.mutated_bar(
+            "    if (!suiteHostShell.scoped || !layoutTransitionsSupported\n"
+            "        || layoutTransitionBusy || providerSnapshotTransitionBusy\n",
+            "    if (!suiteHostShell.scoped || !layoutTransitionsSupported\n"
+            "        || providerSnapshotTransitionBusy\n",
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "admission, busy, and disabled-path checks"
+        ):
+            self.validate(weakened)
+
+    def test_stale_observation_weakening_is_detected(self) -> None:
+        weakened = self.mutated_bar(
+            "        || observationValue !== catalogObservation) return false\n",
+            ") return false\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "stale observation refusal"):
+            self.validate(weakened)
+
+    def test_disabled_path_weakening_is_detected(self) -> None:
+        weakened = self.mutated_bar(
+            "    if (installed !== true) return layoutContains(id)\n",
+            "    if (installed !== true) return true\n",
+        )
+        with self.assertRaisesRegex(
+            AssertionError, "admission, busy, and disabled-path checks"
+        ):
+            self.validate(weakened)
 
 
 class FakeOmarchyRuntime(OmarchyRuntime):
@@ -341,6 +518,84 @@ class RuntimeProcessTests(unittest.TestCase):
         self.assertNotIn([str(
             self.omarchy_root / "bin/omarchy-shell"
         ), "shell", "ping"], calls)
+
+    def test_default_restart_covers_the_host_shutdown_dying_and_ready_phases(self):
+        clock = drain_contract.SyntheticClock()
+        config = self.omarchy_root / "shell/shell.qml"
+
+        def run(command, *, timeout=20, **_kwargs):
+            duration = 119.5 if command[0].endswith("omarchy-restart-shell") else 0.05
+            clock.advance_command(min(duration, timeout))
+            if duration > timeout:
+                try:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                except subprocess.TimeoutExpired as error:
+                    raise RuntimeFailure("host restart phase timed out") from error
+            return self.result(self.instance_json(config))
+
+        self.runtime.run = Mock(side_effect=run)
+        timing = OmarchyRuntime.restart_shell.__globals__["time"]
+        with patch.object(timing, "monotonic", side_effect=clock.monotonic), \
+                patch.object(timing, "sleep", side_effect=clock.sleep):
+            self.runtime.restart_shell()
+        self.assertTrue(119.5 <= clock.now <= 180)
+
+    def test_shutdown_timeout_escalates_only_through_a_verified_pidfd(self):
+        # Refusal before TERM or after its grace must never permit KILL.
+        for stubborn, refused in ((False, 0), (True, 0), (True, 1), (True, 2)):
+            with self.subTest(stubborn=stubborn, refused=refused):
+                clock = drain_contract.SyntheticClock()
+                scenario = drain_contract.DrainScenario(self.omarchy_root, 1, clock=clock)
+                foreign = tuple(scenario.foreign)
+                sent = []
+                output = io.StringIO()
+                failure = None
+
+                def run(command, **kwargs):
+                    if command[:2] == ["quickshell", "kill"]:
+                        clock.advance_command(kwargs["timeout"])
+                        try:
+                            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+                        except subprocess.TimeoutExpired as error:
+                            raise RuntimeFailure("shutdown IPC timed out") from error
+                    return scenario.run(command, **kwargs)
+
+                def send(_descriptor, value, *_args):
+                    sent.append(value)
+                    if value == signal.SIGKILL or not stubborn:
+                        scenario.matching.clear()
+
+                def ready(readers, _writers, _errors, timeout):
+                    if not scenario.matching:
+                        return readers, [], []
+                    clock.sleep(timeout)
+                    return [], [], []
+
+                self.runtime.run = Mock(side_effect=run)
+                timing = OmarchyRuntime.stop_shell.__globals__["time"]
+                with patch.object(timing, "monotonic", side_effect=clock.monotonic), \
+                        patch.object(timing, "sleep", side_effect=clock.sleep), \
+                        patch.object(os, "pidfd_open", return_value=42), \
+                        patch.object(os, "close") as close, \
+                        patch.object(select, "select", side_effect=ready), \
+                        patch.object(signal, "pidfd_send_signal", side_effect=send), \
+                        patch.object(self.runtime, "_shell_process_identity", create=True,
+                            return_value=123,
+                            side_effect=(RuntimeFailure("foreign shell process") if refused == 1
+                                else [123, RuntimeFailure("changed shell identity")] if refused == 2
+                                else None)), \
+                        redirect_stderr(output):
+                    try:
+                        self.runtime.stop_shell()
+                    except RuntimeFailure as error:
+                        failure = error
+                expected = [] if refused == 1 else [signal.SIGTERM] + ([signal.SIGKILL] if stubborn and not refused else [])
+                self.assertEqual((sent, failure is None, bool(scenario.matching), tuple(scenario.foreign)), (expected, not refused, bool(refused), foreign))
+                close.assert_called_once_with(42)
+                self.assertLessEqual(clock.now, 50.15)
+                if refused != 1:
+                    self.assertIn("sending TERM", output.getvalue())
+                    self.assertEqual("sending KILL" in output.getvalue(), stubborn and not refused)
 
     def test_session_lock_preflight_accepts_only_explicitly_unlocked_status(
         self,
@@ -654,9 +909,20 @@ class SuiteLifecycleTests(unittest.TestCase):
         return SimpleNamespace(**defaults)
 
     def install(self) -> None:
+        (self.paths.plugin_dir / "local.extra").mkdir(parents=True, exist_ok=True)
         self.assertEqual(
             command_install(self.args(), self.suite, self.paths, self.runtime), 0
         )
+
+    def write_orphan_shibumi_config(self) -> dict[str, object]:
+        config = json.loads(self.defaults.read_text(encoding="utf-8"))
+        config["bar"]["id"] = "hancore.shibumi.bar"
+        config = migrate_state_settings(config)
+        state_entry(config)["shibumi"]["orphanSetting"] = {
+            "nested": [1, False, "retain"]
+        }
+        atomic_write(self.paths.config_file, encode_config(config))
+        return config
 
     def test_runtime_paths_reject_symlinked_writable_root_before_mutation(
         self,
@@ -665,6 +931,7 @@ class SuiteLifecycleTests(unittest.TestCase):
             "omarchy",
             "omarchy-shell",
             "omarchy-bluetooth-device",
+            "omarchy-bluetooth-power",
             "omarchy-audio-output-set-default",
             "omarchy-plugin-validate",
         ):
@@ -834,6 +1101,36 @@ class SuiteLifecycleTests(unittest.TestCase):
         self.assertEqual(self.runtime.events, [])
         transaction._close_config_parent()
 
+    def test_recovery_accepts_only_previous_boot_device_change(self) -> None:
+        path = self.paths.config_file
+        path.parent.mkdir(parents=True)
+        for mode in ("stale", "legacy", "inode"):
+            with self.subTest(mode=mode):
+                path.write_bytes(b'{"version":1,"before":true}\n')
+                transaction = PluginTransaction(self.paths, self.runtime)
+                transaction.write_config(b'{"version":1,"after":true}\n')
+                transaction._close_config_parent()
+                journal = json.loads(transaction.journal_file.read_text())
+                journal["configParentIdentity"]["device"] += 1
+                journal["configParentIdentity"]["inode"] += int(mode == "inode")
+                if mode == "legacy":
+                    journal.pop("bootId")
+                else:
+                    journal["bootId"] = "00000000-0000-0000-0000-000000000000"
+                transaction.journal_file.write_text(json.dumps(journal))
+                if mode == "legacy":
+                    os.utime(transaction.journal_file, (1, 1))
+                events = list(self.runtime.events)
+                if mode == "inode":
+                    with self.assertRaisesRegex(TransactionError, "config parent identity"):
+                        recover_transactions(self.paths, self.runtime, suite=self.suite)
+                    self.assertEqual(path.read_bytes(), b'{"version":1,"after":true}\n')
+                    self.assertEqual(self.runtime.events, events)
+                    self.assertTrue(transaction.journal_file.is_file())
+                else:
+                    self.assertEqual(recover_transactions(self.paths, self.runtime, suite=self.suite), 1)
+                    self.assertEqual(path.read_bytes(), b'{"version":1,"before":true}\n')
+
     def test_recovery_rejects_regular_config_parent_swap_before_mutation(self) -> None:
         path = self.paths.config_file
         path.parent.mkdir(parents=True)
@@ -950,8 +1247,50 @@ class SuiteLifecycleTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertFalse(self.paths.state_dir.exists())
 
+    def test_payload_identity_uses_owner_execute_bit(self) -> None:
+        published = self.packaged_suite(
+            version="0.1.1-beta.15.2", source_revision=PUBLISHED_BETA152_REVISION
+        )
+        (self.source / "PACKAGE-METADATA.json").unlink()
+        published.revision = Mock(return_value=PUBLISHED_BETA152_REVISION)
+        identity = next(item for item in supported_install_identities(self.suite)
+                        if item["id"] == "public-beta.15.2")
+        health_digest = runpy.run_path(str(
+            REPO_ROOT / "hancore.shibumi.control-center/manager/shibumi-health"
+        ))["payload_digest"]
+        for mode in (0o755, 0o700):
+            for plugin_id, spec in published.plugins.items():
+                for relative in ("nested/__pycache__/cache", "loose.pyc", "nested/loose.pyo"):
+                    cache = spec.source / relative
+                    cache.parent.mkdir(parents=True, exist_ok=True)
+                    cache.write_bytes(b"cache")
+                for path in spec.source.rglob("*"):
+                    if path.is_file() and path.stat().st_mode & 0o100:
+                        path.chmod(mode)
+                digests = (
+                    plugin_payload_digest(spec.source),
+                    _bounded_plugin_payload_digest(
+                        spec.source, {"entries": 0, "bytes": 0}
+                    ),
+                    health_digest(spec.source),
+                )
+                for probe, actual in zip(("model", "admission", "health"), digests):
+                    with self.subTest(mode=oct(mode), plugin=plugin_id, probe=probe):
+                        self.assertEqual(actual, identity["pluginDigests"][plugin_id])
+        self.assertEqual(
+            command_install(self.args(), published, self.paths, self.runtime), 0
+        )
+        self.assertEqual(
+            preflight_lifecycle_state(self.paths, self.suite), "public-beta.15.2"
+        )
+        (spec.source / "manifest.json").write_bytes((spec.source / "manifest.json").read_bytes() + b"\n")
+        self.assertNotEqual(health_digest(spec.source), digests[-1])
+
     def test_exact_beta141_package_identity_is_admitted(self) -> None:
-        packaged_suite = self.packaged_suite()
+        packaged_suite = self.packaged_suite(
+            version="0.1.1-beta.14.1",
+            source_revision=PUBLISHED_BETA141_REVISION,
+        )
         self.assertEqual(
             require_current_payload_identity(packaged_suite), "public-beta.14.1"
         )
@@ -1020,8 +1359,286 @@ class SuiteLifecycleTests(unittest.TestCase):
             "public-beta.14.1",
         )
 
-    def test_mutated_beta141_package_identity_is_rejected(self) -> None:
+    def assert_published_checkout_can_update_from_tag(
+        self, tag: str, revision: str, identity_id: str
+    ) -> None:
+        source_root = self.root / "published-tag-source"
+        source_root.mkdir()
+        resolved = subprocess.run(
+            ["git", "--no-replace-objects", "rev-parse", f"refs/tags/{tag}^{{commit}}"],
+            cwd=REPO_ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(resolved, revision)
+        archive = subprocess.run(
+            [
+                "git", "--no-replace-objects", "archive", "--format=tar",
+                revision, "--", "contracts/plugin-suite-v1.json",
+                *self.suite.plugins.keys(),
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as stream:
+            stream.extractall(source_root, filter="data")
+        published = Suite.load(source_root)
+        published.revision = Mock(return_value=revision)  # type: ignore[method-assign]
+
+        self.assertEqual(
+            command_install(self.args(), published, self.paths, self.runtime), 0
+        )
+        installed = load_install_state(self.paths, published)
+        self.assertEqual(installed["sourceRevision"], revision)
+        self.assertEqual(installed["installOrigin"], "checkout")
+        # Admit the old on-disk plugin markers before any mutation begins.
+        self.assertEqual(
+            preflight_lifecycle_state(self.paths, self.suite), identity_id
+        )
+        self.assertEqual(
+            command_update(self.args(), self.suite, self.paths, self.runtime), 0
+        )
+        updated = load_install_state(self.paths, self.suite)
+        self.assertEqual(updated["suiteVersion"], self.suite.version)
+        self.assertEqual(updated["installOrigin"], "checkout")
+        self.assertNotEqual(updated["sourceRevision"], revision)
+
+    def test_published_beta15_checkout_can_update_from_its_tag(self) -> None:
+        self.assert_published_checkout_can_update_from_tag(
+            "v0.1.1-beta.15", PUBLISHED_BETA15_REVISION, "public-beta.15"
+        )
+
+    def test_published_beta151_checkout_can_update_from_its_tag(self) -> None:
+        self.assert_published_checkout_can_update_from_tag(
+            "v0.1.1-beta.15.1", PUBLISHED_BETA151_REVISION, "public-beta.15.1"
+        )
+
+    def test_published_beta152_checkout_can_update_from_its_tag(self) -> None:
+        self.assert_published_checkout_can_update_from_tag(
+            "v0.1.1-beta.15.2", PUBLISHED_BETA152_REVISION, "public-beta.15.2"
+        )
+
+    def test_published_beta153_checkout_can_update_from_its_tag(self) -> None:
+        self.assert_published_checkout_can_update_from_tag(
+            "v0.1.1-beta.15.3", PUBLISHED_BETA153_REVISION, "public-beta.15.3"
+        )
+
+    def test_published_beta154_checkout_can_update_from_its_tag(self) -> None:
+        self.assert_published_checkout_can_update_from_tag(
+            "v0.1.1-beta.15.4", PUBLISHED_BETA154_REVISION, "public-beta.15.4"
+        )
+
+    def test_published_beta16_checkout_can_update_from_its_tag(self) -> None:
+        self.assert_published_checkout_can_update_from_tag(
+            "v0.1.1-beta.16", PUBLISHED_BETA16_REVISION, "public-beta.16"
+        )
+
+    def test_admitted_beta15_merge_payloads_match_their_exact_tags(self) -> None:
+        releases = (
+            (PUBLISHED_BETA15_REVISION, (
+                "91b2cd0f886c15962a2627aea3269f4c09cae828",
+                "7c0499289c48b9f4b3dfd28687a23824e752f15d",
+            )),
+            (PUBLISHED_BETA151_REVISION, (
+                "533110d7abda296b56369f304a618f9313e1f12f",
+            )),
+            (PUBLISHED_BETA152_REVISION, (
+                "aaf7611d66ed5f99078fc5419bc3ba4db6164bed",
+            )),
+            (PUBLISHED_BETA153_REVISION, (
+                "db579163a4b1004a7cc09ee565cac616db9ff627",
+            )),
+            (PUBLISHED_BETA154_REVISION, (
+                "67d87c5d7f61fca4b05e79a089238805e0e0737f",
+                "81f6bcd28cf0e0b5c435761150b2b73083f1e4fa",
+            )),
+            (PUBLISHED_BETA16_REVISION, (
+                "05548c8d9ffdf0d37962d6e423e2a0dc21b8cd91",
+            )),
+        )
+        payload_paths = ["contracts/plugin-suite-v1.json", *self.suite.plugins]
+        for tag_revision, merges in releases:
+            for merge_revision in merges:
+                with self.subTest(tag=tag_revision, merge=merge_revision):
+                    result = subprocess.run(
+                        [
+                            "git", "--no-replace-objects", "diff", "--exit-code",
+                            tag_revision, merge_revision, "--", *payload_paths,
+                        ],
+                        cwd=REPO_ROOT,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_exact_beta15_package_identity_is_admitted(self) -> None:
+        packaged_suite = self.packaged_suite(
+            version="0.1.1-beta.15",
+            source_revision=PUBLISHED_BETA15_REVISION,
+        )
+
+        self.assertEqual(
+            require_current_payload_identity(packaged_suite), "public-beta.15"
+        )
+        beta15 = next(
+            item
+            for item in supported_install_identities(packaged_suite)
+            if item["id"] == "public-beta.15"
+        )
+        self.assertEqual(
+            suite_payload_digest({
+                plugin_id: spec.payload_digest()
+                for plugin_id, spec in packaged_suite.plugins.items()
+            }),
+            beta15["payloadDigest"],
+        )
+        self.assertFalse(self.paths.state_dir.exists())
+        self.assertFalse(self.paths.plugin_dir.exists())
+        self.assertFalse(self.paths.config_file.exists())
+        self.assertEqual(self.runtime.events, [])
+
+    def test_exact_beta151_package_identity_is_admitted(self) -> None:
+        packaged_suite = self.packaged_suite(
+            version="0.1.1-beta.15.1",
+            source_revision=PUBLISHED_BETA151_REVISION,
+        )
+
+        self.assertEqual(
+            require_current_payload_identity(packaged_suite), "public-beta.15.1"
+        )
+        beta151 = next(
+            item
+            for item in supported_install_identities(packaged_suite)
+            if item["id"] == "public-beta.15.1"
+        )
+        self.assertEqual(
+            suite_payload_digest({
+                plugin_id: spec.payload_digest()
+                for plugin_id, spec in packaged_suite.plugins.items()
+            }),
+            beta151["payloadDigest"],
+        )
+        self.assertFalse(self.paths.state_dir.exists())
+        self.assertFalse(self.paths.plugin_dir.exists())
+        self.assertFalse(self.paths.config_file.exists())
+        self.assertEqual(self.runtime.events, [])
+
+    def test_exact_beta152_package_identity_is_admitted(self) -> None:
+        packaged_suite = self.packaged_suite(
+            version="0.1.1-beta.15.2",
+            source_revision=PUBLISHED_BETA152_REVISION,
+        )
+
+        self.assertEqual(
+            require_current_payload_identity(packaged_suite), "public-beta.15.2"
+        )
+        self.assertFalse(self.paths.state_dir.exists())
+        self.assertFalse(self.paths.plugin_dir.exists())
+        self.assertFalse(self.paths.config_file.exists())
+        self.assertEqual(self.runtime.events, [])
+
+    def test_published_beta153_package_identity_is_admitted(self) -> None:
+        packaged_suite = self.packaged_suite(
+            version="0.1.1-beta.15.3",
+            source_revision=PUBLISHED_BETA153_REVISION,
+        )
+        self.assertEqual(
+            require_current_payload_identity(packaged_suite), "public-beta.15.3"
+        )
+
+    def test_exact_current_package_identity_is_admitted(self) -> None:
         packaged_suite = self.packaged_suite()
+        self.assertEqual(
+            require_current_payload_identity(packaged_suite), CURRENT_ID
+        )
+        self.assertFalse(self.paths.state_dir.exists())
+        self.assertFalse(self.paths.plugin_dir.exists())
+        self.assertFalse(self.paths.config_file.exists())
+        self.assertEqual(self.runtime.events, [])
+
+    def test_current_package_rejects_byte_and_mode_drift(self) -> None:
+        packaged_suite = self.packaged_suite()
+        drift_path = self.source / "hancore.shibumi.bar/Bar.qml"
+        payload = drift_path.read_bytes()
+        mode = stat.S_IMODE(drift_path.stat().st_mode)
+        for mutation in ("bytes", "mode"):
+            with self.subTest(mutation=mutation):
+                self.assertEqual(
+                    require_current_payload_identity(packaged_suite), CURRENT_ID
+                )
+                try:
+                    if mutation == "bytes":
+                        replacement = b" " if payload[-1:] != b" " else b"\n"
+                        drift_path.write_bytes(payload[:-1] + replacement)
+                    else:
+                        drift_path.chmod(mode ^ stat.S_IXUSR)
+                    with self.assertRaisesRegex(
+                        AdmissionError, "exact declared revision identity"
+                    ):
+                        require_current_payload_identity(packaged_suite)
+                    self.assertFalse(self.paths.state_dir.exists())
+                    self.assertFalse(self.paths.plugin_dir.exists())
+                    self.assertFalse(self.paths.config_file.exists())
+                    self.assertEqual(self.runtime.events, [])
+                finally:
+                    drift_path.write_bytes(payload)
+                    drift_path.chmod(mode)
+        self.assertEqual(
+            require_current_payload_identity(packaged_suite), CURRENT_ID
+        )
+
+    def test_mutated_beta151_package_bytes_are_rejected(self) -> None:
+        packaged_suite = self.packaged_suite(
+            version="0.1.1-beta.15.1",
+            source_revision=PUBLISHED_BETA151_REVISION,
+        )
+        self.assertEqual(
+            require_current_payload_identity(packaged_suite), "public-beta.15.1"
+        )
+        drift_path = self.source / "hancore.shibumi.bar/Bar.qml"
+        payload = drift_path.read_bytes()
+        replacement = b" " if payload[-1:] != b" " else b"\n"
+        drift_path.write_bytes(payload[:-1] + replacement)
+
+        with self.assertRaisesRegex(
+            AdmissionError, "exact declared revision identity"
+        ):
+            require_current_payload_identity(packaged_suite)
+        self.assertFalse(self.paths.state_dir.exists())
+        self.assertFalse(self.paths.plugin_dir.exists())
+        self.assertFalse(self.paths.config_file.exists())
+        self.assertEqual(self.runtime.events, [])
+
+    def test_mutated_beta151_package_mode_is_rejected(self) -> None:
+        packaged_suite = self.packaged_suite(
+            version="0.1.1-beta.15.1",
+            source_revision=PUBLISHED_BETA151_REVISION,
+        )
+        self.assertEqual(
+            require_current_payload_identity(packaged_suite), "public-beta.15.1"
+        )
+        drift_path = self.source / "hancore.shibumi.bar/Bar.qml"
+        drift_path.chmod(drift_path.stat().st_mode | stat.S_IXUSR)
+
+        with self.assertRaisesRegex(
+            AdmissionError, "exact declared revision identity"
+        ):
+            require_current_payload_identity(packaged_suite)
+        self.assertFalse(self.paths.state_dir.exists())
+        self.assertFalse(self.paths.plugin_dir.exists())
+        self.assertFalse(self.paths.config_file.exists())
+        self.assertEqual(self.runtime.events, [])
+
+    def test_mutated_beta141_package_identity_is_rejected(self) -> None:
+        packaged_suite = self.packaged_suite(
+            version="0.1.1-beta.14.1",
+            source_revision=PUBLISHED_BETA141_REVISION,
+        )
+        self.assertEqual(
+            require_current_payload_identity(packaged_suite), "public-beta.14.1"
+        )
         drift_path = self.source / "hancore.shibumi.bar/Bar.qml"
         payload = drift_path.read_bytes()
         replacement = b" " if payload[-1:] != b" " else b"\n"
@@ -1037,7 +1654,7 @@ class SuiteLifecycleTests(unittest.TestCase):
         self.assertEqual(self.runtime.events, [])
 
     def test_unknown_future_package_identity_is_rejected(self) -> None:
-        packaged_suite = self.packaged_suite("0.1.1-beta.15")
+        packaged_suite = self.packaged_suite("0.1.1-beta.17")
 
         with self.assertRaisesRegex(
             AdmissionError, "exact declared revision identity"
@@ -1071,6 +1688,114 @@ class SuiteLifecycleTests(unittest.TestCase):
             self.paths.config_file.read_text(encoding="utf-8")
         )
         self.assertNotIn("transparent", uninstalled["bar"])
+
+    def test_orphan_install_deactivate_restores_implicit_stock_bar_and_settings(
+        self,
+    ) -> None:
+        self.write_orphan_shibumi_config()
+        expected_bar = copy.deepcopy(
+            json.loads(self.defaults.read_text(encoding="utf-8"))["bar"]
+        )
+        expected_bar["id"] = "omarchy.bar"
+
+        self.install()
+        self.assertEqual(
+            load_install_state(self.paths, self.suite)["previousBar"], expected_bar
+        )
+        self.assertEqual(
+            command_deactivate(self.args(), self.suite, self.paths, self.runtime), 0
+        )
+
+        restored = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+        expected_bar["layout"]["left"].append(
+            {"id": "hancore.shibumi.control-center"}
+        )
+        self.assertEqual(restored["bar"], expected_bar)
+        self.assertEqual(
+            state_entry(restored)["shibumi"]["orphanSetting"],
+            {"nested": [1, False, "retain"]},
+        )
+
+    def test_orphan_install_uninstall_restores_explicit_stock_bar_and_settings(
+        self,
+    ) -> None:
+        defaults = json.loads(self.defaults.read_text(encoding="utf-8"))
+        defaults["bar"]["id"] = "omarchy.bar"
+        atomic_write(self.defaults, encode_config(defaults))
+        self.write_orphan_shibumi_config()
+
+        self.install()
+        self.assertEqual(
+            load_install_state(self.paths, self.suite)["previousBar"], defaults["bar"]
+        )
+        self.assertEqual(
+            command_uninstall(
+                self.args(keep_settings=True), self.suite, self.paths, self.runtime
+            ),
+            0,
+        )
+
+        restored = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+        self.assertEqual(restored["bar"], defaults["bar"])
+        self.assertEqual(
+            state_entry(restored)["shibumi"]["orphanSetting"],
+            {"nested": [1, False, "retain"]},
+        )
+
+    def test_orphan_install_rejects_invalid_host_defaults_before_mutation(
+        self,
+    ) -> None:
+        self.write_orphan_shibumi_config()
+        original_config = self.paths.config_file.read_bytes()
+        valid = json.loads(self.defaults.read_text(encoding="utf-8"))
+        cases = {
+            "absent": None,
+            "invalid-json": b"{",
+            "no-bar": encode_config({"version": 1, "plugins": []}),
+            "null-id": encode_config({**valid, "bar": {**valid["bar"], "id": None}}),
+            "empty-id": encode_config({**valid, "bar": {**valid["bar"], "id": ""}}),
+            "foreign-id": encode_config(
+                {**valid, "bar": {**valid["bar"], "id": "third.party.bar"}}
+            ),
+        }
+
+        for label, payload in cases.items():
+            with self.subTest(case=label):
+                if payload is None:
+                    self.defaults.unlink(missing_ok=True)
+                else:
+                    self.defaults.write_bytes(payload)
+                with self.assertRaises(ConfigError):
+                    command_install(self.args(), self.suite, self.paths, self.runtime)
+                self.assertEqual(self.paths.config_file.read_bytes(), original_config)
+                self.assertEqual(self.runtime.events, [])
+                self.assertFalse(self.paths.plugin_dir.exists())
+                self.assertFalse(self.paths.state_dir.exists())
+
+    def test_orphan_external_install_never_records_shibumi_as_previous_bar(
+        self,
+    ) -> None:
+        self.write_orphan_shibumi_config()
+        expected = copy.deepcopy(
+            json.loads(self.defaults.read_text(encoding="utf-8"))["bar"]
+        )
+        expected["id"] = "omarchy.bar"
+
+        self.assertEqual(
+            command_install(
+                self.args(no_activate=True, keep_layout=True),
+                self.suite,
+                self.paths,
+                self.runtime,
+            ),
+            0,
+        )
+
+        state = load_install_state(self.paths, self.suite)
+        self.assertEqual(state["previousBar"], expected)
+        installed = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+        self.assertEqual(installed["bar"]["id"], "hancore.shibumi.bar")
+        self.assertEqual(state["activation"]["mode"], "external")
 
     def test_lifecycle_never_mutates_hyprland_appearance_config(self) -> None:
         hypr_root = self.root / "config/hypr"
@@ -1160,20 +1885,57 @@ class SuiteLifecycleTests(unittest.TestCase):
         config["plugins"].append({"id": plugin_id, "custom": "old"})
         atomic_write(self.paths.config_file, encode_config(config))
 
-    def packaged_suite(self, version: str = "0.1.1-beta.14.1") -> Suite:
-        # A fork must not pretend its modified payload is the historical public
-        # package. Build this compatibility fixture from the actual upstream pin.
-        plugins = sorted(self.suite.plugins)
-        archive = subprocess.check_output(['git', '-C', str(REPO_ROOT), 'archive',
-            '--format=tar', '7a6c853b1947d303bad9a5b640c224c01b669106', '--', *plugins])
-        for identity in plugins:
-            shutil.rmtree(self.source / identity)
-        with tarfile.open(fileobj=io.BytesIO(archive)) as packed:
-            packed.extractall(self.source, filter='data')
-        metadata_path = self.source / "PACKAGE-METADATA.json"
-        shutil.copy2(REPO_ROOT / "packaging/package-metadata.json", metadata_path)
+    def packaged_suite(
+        self,
+        version: str = CURRENT_VERSION,
+        source_revision: str | None = None,
+    ) -> Suite:
+        if source_revision is None and version == "0.2.1":
+            source_revision = "29a588a9d3ec82a5d5c75cc76e8f745f5c9ae629"
+        if source_revision is None and version == "0.2.2":
+            source_revision = "d20f0526b12684453252fe2d722e996fedfe5eab"
+        if source_revision is None and version == "0.2.3":
+            source_revision = "41002a830027faaac2a8436eea6f6aae0dcca4b5"
+        if source_revision is None and version == "0.2.4":
+            source_revision = "12763c6874a9af02fa8e038ab520a409c60f8dc2"
+        # Personal fork: never present the fork's modified payload as a public
+        # package. Default fixtures to the actual upstream release revision.
+        if source_revision is None and version == CURRENT_VERSION:
+            source_revision = "f944f9ab60b93d01ea1dce32ab14516a7c577f69"
+        if source_revision is None and version == "0.1.1-beta.14.1":
+            source_revision = PUBLISHED_BETA141_REVISION
         suite_contract_path = self.source / "contracts/plugin-suite-v1.json"
         suite_contract = json.loads(suite_contract_path.read_text(encoding="utf-8"))
+        plugin_ids = [item["id"] for item in suite_contract["plugins"]]
+        metadata_source = REPO_ROOT / "packaging/package-metadata.json"
+        if source_revision is not None:
+            for plugin_id in plugin_ids:
+                shutil.rmtree(self.source / plugin_id)
+            archive = subprocess.run(
+                [
+                    "git",
+                    "--no-replace-objects",
+                    "-C",
+                    str(REPO_ROOT),
+                    "archive",
+                    source_revision,
+                    "--",
+                    *plugin_ids,
+                    "contracts/plugin-suite-v1.json",
+                    "packaging/package-metadata.json",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+                bundle.extractall(self.source, filter="data")
+            metadata_source = self.source / "packaging/package-metadata.json"
+            suite_contract = json.loads(
+                suite_contract_path.read_text(encoding="utf-8")
+            )
+
+        metadata_path = self.source / "PACKAGE-METADATA.json"
+        shutil.copy2(metadata_source, metadata_path)
         suite_contract["suiteVersion"] = version
         suite_contract_path.write_text(
             json.dumps(suite_contract, indent=2) + "\n", encoding="utf-8"
@@ -1193,6 +1955,7 @@ class SuiteLifecycleTests(unittest.TestCase):
             "omarchy-shell",
             "omarchy-plugin-validate",
             "omarchy-bluetooth-device",
+            "omarchy-bluetooth-power",
             "omarchy-audio-output-set-default",
         ):
             (bin_dir / command).write_text("#!/bin/sh\n", encoding="utf-8")
@@ -1362,6 +2125,38 @@ class SuiteLifecycleTests(unittest.TestCase):
             "shellRunning": self.runtime.shell_running,
         }
 
+    def test_menu_parse_diagnostic_names_source_location_and_remedy(self) -> None:
+        menu = self.paths.menu_extension_file
+        stock = self.paths.omarchy_root / "default/omarchy/omarchy-menu.jsonc"
+        menu.parent.mkdir(parents=True, exist_ok=True)
+        stock.parent.mkdir(parents=True, exist_ok=True)
+        malformed = '{\n  // retained comment\n  "one": {}\n  "two": {}\n}\n'
+        marked = malformed.replace("// retained comment", START_MARKER + "\n  // generated block\n  " + END_MARKER)
+        for raw, host_raw, source in ((malformed, None, menu), (marked, None, menu), ("{}\n", malformed, stock)):
+            with self.subTest(source=source, markers=START_MARKER in raw):
+                menu.write_text(raw)
+                if host_raw is None:
+                    stock.unlink(missing_ok=True)
+                else:
+                    stock.write_text(host_raw)
+                writes = []
+                transaction = SimpleNamespace(paths=self.paths, menu_extension_existed=True, write_menu_extension=writes.append)
+                failure = None
+                try:
+                    install_picker_menu_extension(transaction, self.runtime)
+                except Exception as error:
+                    failure = error
+                invalid = host_raw if source == stock else raw
+                position = invalid.index('"two"')
+                line = invalid[:position].count("\n") + 1
+                remedy = ("restore the Omarchy stock menu, then retry the same command" if source == stock
+                    else "fix the JSONC syntax or routing markers in this regular file, then retry the same command")
+                expected = f"cannot update Omarchy menu {source}: invalid Omarchy menu extension JSONC: Expecting ',' delimiter: line {line} column 3 (char {position}); {remedy}"
+                self.assertEqual(
+                    (type(failure), str(failure), writes, self.runtime.menu_refreshes, menu.read_text(), stock.read_text() if stock.exists() else None),
+                    (CliError, expected, [], 0, raw, host_raw),
+                )
+
     def test_menu_extension_merge_is_idempotent_and_reversible(self) -> None:
         original = (
             "{\n"
@@ -1386,6 +2181,56 @@ class SuiteLifecycleTests(unittest.TestCase):
         self.assertEqual(install_picker_routing(installed), installed)
         self.assertEqual(remove_picker_routing(installed), original)
 
+    def test_picker_routes_fall_back_only_when_router_is_not_executable(self) -> None:
+        home = self.root / "home with spaces"
+        router = home / ".config/omarchy/plugins/hancore.shibumi.quick-access/scripts/shibumi-picker-route"
+        router.parent.mkdir(parents=True)
+        commands = self.root / "commands"
+        commands.mkdir()
+        log = self.root / "route.log"
+        scripts = {
+            "omarchy-theme-switcher": 'printf "theme-switcher\\n" >>"$ROUTE_LOG"; printf "Theme With Spaces"',
+            "omarchy-theme-set": 'printf "theme-set:<%s>\\n" "$1" >>"$ROUTE_LOG"',
+            "omarchy-theme-bg-switcher": 'printf "background-switcher\\n" >>"$ROUTE_LOG"; printf "Background With Spaces"',
+            "omarchy-theme-bg-set": 'printf "background-set:<%s>\\n" "$1" >>"$ROUTE_LOG"',
+            "omarchy-shell": 'printf "native:" >>"$ROUTE_LOG"; printf "<%s>" "$@" >>"$ROUTE_LOG"; printf "\\n" >>"$ROUTE_LOG"',
+        }
+        for name, body in scripts.items():
+            target = commands / name
+            target.write_text("#!/bin/bash\n" + body + "\n")
+            target.chmod(0o700)
+        background = 'background=$(omarchy-theme-bg-switcher); [[ -n $background ]] && omarchy-theme-bg-set "$background"'
+        stock_menu = self.paths.omarchy_root / "default/omarchy/omarchy-menu.jsonc"
+        stock_menu.parent.mkdir(parents=True)
+        for family, theme, theme_calls in (
+            ('style', 'theme=$(omarchy-theme-switcher); [[ -n $theme ]] && omarchy-theme-set "$theme"', "theme-switcher\ntheme-set:<Theme With Spaces>\n"),
+            ('style', 'omarchy-shell shell summon omarchy.image-picker \'{"source":"themes"}\'', 'native:<shell><summon><omarchy.image-picker><{"source":"themes"}>\n'),
+            ('appearance', 'omarchy-shell shell summon omarchy.image-picker \'{"source":"themes"}\'', 'native:<shell><summon><omarchy.image-picker><{"source":"themes"}>\n'),
+        ):
+            stock_menu.write_text(json.dumps({f"{family}.theme": {"action": theme}, f"{family}.background": {"action": background}}))
+            legacy_actions = {"style.theme": "theme", "style.background": "wallpaper"}
+            legacy = "{\n" + START_MARKER + "\n" + ",\n".join(json.dumps(key) + ": " + json.dumps({"action": '\"$HOME/.config/omarchy/plugins/hancore.shibumi.quick-access/scripts/shibumi-picker-route\" ' + value}) for key, value in legacy_actions.items()) + "\n" + END_MARKER + "\n}\n"
+            self.paths.menu_extension_file.parent.mkdir(parents=True, exist_ok=True)
+            self.paths.menu_extension_file.write_text(legacy)
+            payloads = []
+            transaction = SimpleNamespace(paths=self.paths, menu_extension_existed=True, write_menu_extension=payloads.append)
+            install_picker_menu_extension(transaction, self.runtime)
+            rendered = payloads[-1].decode()
+            self.assertEqual(set(_decoded(rendered)), {f"{family}.theme", f"{family}.background"})
+            self.assertEqual([entry["action"].split("; else ", 1)[1] for entry in _decoded(rendered).values()], [theme + "; fi", background + "; fi"])
+            self.assertEqual((rendered.count(START_MARKER), rendered.count(END_MARKER), remove_picker_routing(rendered)), (1, 1, "{\n}\n"))
+            for mode in ("missing", "non-executable", "present", "failing"):
+                router.unlink(missing_ok=True)
+                if mode != "missing":
+                    router.write_text('#!/bin/bash\nprintf "router:<%s>\\n" "$1" >>"$ROUTE_LOG"\nexit ' + ("17" if mode == "failing" else "0") + "\n")
+                    router.chmod(0o600 if mode == "non-executable" else 0o700)
+                for key, argument in ((f"{family}.theme", "theme"), (f"{family}.background", "wallpaper")):
+                    with self.subTest(theme=theme, mode=mode, route=key):
+                        log.write_text("")
+                        result = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", _decoded(rendered)[key]["action"]], env={"HOME": str(home), "PATH": str(commands), "ROUTE_LOG": str(log)}, capture_output=True, text=True, timeout=3)
+                        expected = (theme_calls if argument == "theme" else "background-switcher\nbackground-set:<Background With Spaces>\n") if mode in ("missing", "non-executable") else "router:<" + argument + ">\n"
+                        self.assertEqual((result.returncode, log.read_text()), (17 if mode == "failing" else 0, expected), result.stderr)
+
     def test_menu_extension_supports_items_wrapper(self) -> None:
         original = (
             "{\n"
@@ -1398,6 +2243,20 @@ class SuiteLifecycleTests(unittest.TestCase):
         installed = install_picker_routing(original)
         self.assertIn('"style.background"', installed)
         self.assertEqual(remove_picker_routing(installed), original)
+        appearance = install_picker_routing(original, json.dumps({"items": {
+            "appearance.theme": {"action": "theme-command"},
+            "appearance.background": {"action": "background-command"},
+        }}))
+        self.assertEqual(set(_decoded(appearance)["items"]),
+            {"personal", "appearance.theme", "appearance.background"})
+        self.assertEqual(remove_picker_routing(appearance), original)
+        self.assertEqual(install_picker_routing(appearance, json.dumps({"items": {
+            "appearance.theme": {"action": "theme-command"},
+            "appearance.background": {"action": "background-command"},
+        }})), appearance)
+        warnings = []
+        skipped = install_picker_routing(installed, '{"items": {}}', warnings=warnings)
+        self.assertEqual((skipped, warnings), (original, ["stock menu has neither style.theme nor appearance.theme; picker routing skipped"]))
 
     def test_menu_refresh_retries_quattro_not_ready_response(self) -> None:
         runtime = OmarchyRuntime()
@@ -1442,8 +2301,8 @@ class SuiteLifecycleTests(unittest.TestCase):
         state = load_install_state(self.paths, suite)
         self.assertEqual(state["installOrigin"], "package")
         self.assertEqual(state["packageName"], "shibumi-shell")
-        self.assertEqual(state["packageVersion"], "0.1.1-beta.14.1")
-        self.assertEqual(state["sourceRevision"], "package:0.1.1-beta.14.1")
+        self.assertEqual(state["packageVersion"], CURRENT_VERSION)
+        self.assertEqual(state["sourceRevision"], f"package:{CURRENT_VERSION}")
         self.assertNotIn("sourceRoot", state)
         self.assertEqual(state["payloadRoot"], str(self.source.resolve()))
 
@@ -1462,7 +2321,7 @@ class SuiteLifecycleTests(unittest.TestCase):
         package_state = load_install_state(self.paths, suite)
         self.assertEqual(package_state["installOrigin"], "package")
         self.assertEqual(package_state["packageName"], "shibumi-shell")
-        self.assertEqual(package_state["packageVersion"], "0.1.1-beta.14.1")
+        self.assertEqual(package_state["packageVersion"], CURRENT_VERSION)
         self.assertNotIn("sourceRoot", package_state)
 
     def test_sandbox_update_advances_beta_7_to_beta_9(self) -> None:
@@ -1534,7 +2393,7 @@ class SuiteLifecycleTests(unittest.TestCase):
             plugin_id: spec.payload_digest()
             for plugin_id, spec in self.suite.plugins.items()
         }
-        self.assertEqual(updated["suiteVersion"], "0.1.1-beta.14.1")
+        self.assertEqual(updated["suiteVersion"], CURRENT_VERSION)
         self.assertEqual(updated["sourceRoot"], str(self.source.resolve()))
         self.assertEqual(updated["pluginDigests"], expected_digests)
         self.assertEqual(len(updated["plugins"]), 24)
@@ -1552,7 +2411,7 @@ class SuiteLifecycleTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(manifest["version"], "0.1.1-beta.14.1")
+            self.assertEqual(manifest["version"], CURRENT_VERSION)
 
     def test_locked_update_discards_staging_without_live_reconciliation(self) -> None:
         self.install()
@@ -1761,7 +2620,7 @@ class SuiteLifecycleTests(unittest.TestCase):
         for operation in (command_update, command_repair):
             with self.subTest(operation=operation.__name__):
                 state = json.loads(state_path.read_text(encoding="utf-8"))
-                state["suiteVersion"] = "0.1.1-beta.14.1+installed.9"
+                state["suiteVersion"] = f"{CURRENT_VERSION}+installed.9"
                 state_path.write_text(
                     json.dumps(state, indent=2) + "\n", encoding="utf-8"
                 )
@@ -1770,7 +2629,7 @@ class SuiteLifecycleTests(unittest.TestCase):
                     0,
                 )
                 updated = json.loads(state_path.read_text(encoding="utf-8"))
-                self.assertEqual(updated["suiteVersion"], "0.1.1-beta.14.1")
+                self.assertEqual(updated["suiteVersion"], CURRENT_VERSION)
 
         self.assertEqual(
             version_key("1.0.0+build.7"),
@@ -1799,7 +2658,9 @@ class SuiteLifecycleTests(unittest.TestCase):
         )
         state_path = self.paths.state_dir / "install.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        state["suiteVersion"] = "0.1.1"
+        newer_version = "0.3.0"
+        self.assertGreater(version_key(newer_version), version_key(CURRENT_VERSION))
+        state["suiteVersion"] = newer_version
         state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
         state_before = state_path.read_bytes()
         config_before = self.paths.config_file.read_bytes()
@@ -1818,8 +2679,10 @@ class SuiteLifecycleTests(unittest.TestCase):
         )
         state_path = self.paths.state_dir / "install.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        state["suiteVersion"] = "0.1.1"
-        state["packageVersion"] = "0.1.1"
+        newer_version = "0.3.0"
+        self.assertGreater(version_key(newer_version), version_key(CURRENT_VERSION))
+        state["suiteVersion"] = newer_version
+        state["packageVersion"] = newer_version
         state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
         self.assertEqual(
@@ -1833,9 +2696,9 @@ class SuiteLifecycleTests(unittest.TestCase):
         )
 
         rolled_back = load_install_state(self.paths, suite)
-        self.assertEqual(rolled_back["suiteVersion"], "0.1.1-beta.14.1")
-        self.assertEqual(rolled_back["packageVersion"], "0.1.1-beta.14.1")
-        self.assertEqual(rolled_back["sourceRevision"], "package:0.1.1-beta.14.1")
+        self.assertEqual(rolled_back["suiteVersion"], CURRENT_VERSION)
+        self.assertEqual(rolled_back["packageVersion"], CURRENT_VERSION)
+        self.assertEqual(rolled_back["sourceRevision"], f"package:{CURRENT_VERSION}")
 
     def test_rescan_uses_shell_ipc_contract(self) -> None:
         runtime = OmarchyRuntime()
@@ -1865,6 +2728,37 @@ class SuiteLifecycleTests(unittest.TestCase):
         ), 0)
         self.assertEqual(self.runtime.restarts, restarts_before + 1)
         self.assertFalse(extension.exists())
+
+    def test_uninstall_reports_postcommit_leftovers(self) -> None:
+        self.install()
+        marked = self.paths.menu_extension_file.read_text()
+        finish = PluginTransaction.finish
+        rmtree = shutil.rmtree
+        def finish_with_leftovers(transaction, *args, **kwargs):
+            finish(transaction, *args, **kwargs)
+            # Explicit post-commit external-writer / cleanup-failure control,
+            # not attribution of the reporter's unknown live sequence.
+            self.paths.menu_extension_file.parent.mkdir(parents=True, exist_ok=True)
+            self.paths.menu_extension_file.write_text(marked)
+            self.paths.state_dir.mkdir(parents=True, exist_ok=True)
+            (self.paths.state_dir / "leftover").write_text("fixture\n")
+        def denied_state_cleanup(path, *args, **kwargs):
+            if Path(path) == self.paths.state_dir:
+                raise PermissionError("injected state cleanup refusal")
+            return rmtree(path, *args, **kwargs)
+        output = io.StringIO()
+        with patch.object(PluginTransaction, "finish", finish_with_leftovers), patch("shibumi_suite.cli.shutil.rmtree", side_effect=denied_state_cleanup), redirect_stdout(output), redirect_stderr(output):
+            try:
+                code = command_uninstall(self.args(), self.suite, self.paths, self.runtime)
+            except OSError:
+                code = -1
+        lines = output.getvalue().splitlines()
+        reports = [line for line in lines if str(self.paths.menu_extension_file) in line or str(self.paths.state_dir) in line]
+        self.assertEqual((code, len(reports), all("same checkout" in line for line in reports), "Uninstalled Shibumi and restored the stock Omarchy bar." in lines), (1, 2, True, False), output.getvalue())
+
+    def test_first_install_does_not_retain_empty_backup_slots(self) -> None:
+        self.install()
+        self.assertEqual([path.name for path in (self.paths.state_dir / "backups").glob("*") if path.is_dir() and not any(path.iterdir())], [])
 
     def test_uninstall_uses_full_restart_instead_of_hot_reload(self) -> None:
         self.install()
@@ -2071,6 +2965,9 @@ class SuiteLifecycleTests(unittest.TestCase):
 
     def test_activate_after_deactivate_keeps_host_layouts_separate(self) -> None:
         self.install()
+        config = json.loads(self.paths.config_file.read_text())
+        config["bar"]["position"] = "bottom"
+        atomic_write(self.paths.config_file, encode_config(config))
         self.assertEqual(
             command_deactivate(self.args(), self.suite, self.paths, self.runtime),
             0,
@@ -2084,6 +2981,8 @@ class SuiteLifecycleTests(unittest.TestCase):
             for entry in inactive["bar"]["layout"][region]
         }
         self.assertIn("omarchy.menu", inactive_ids)
+        self.assertEqual(inactive["bar"]["position"], "top")
+        command_deactivate(self.args(), self.suite, self.paths, self.runtime)
 
         self.assertEqual(
             command_activate(self.args(), self.suite, self.paths, self.runtime),
@@ -2099,6 +2998,52 @@ class SuiteLifecycleTests(unittest.TestCase):
         self.assertFalse(
             any(plugin_id.startswith("omarchy.") for plugin_id in active_ids)
         )
+        self.assertEqual(active["bar"]["position"], "bottom")
+        active["bar"].pop("id")  # Native bar reset/use keeps position host-shared.
+        active["bar"]["position"] = "top"
+        atomic_write(self.paths.config_file, encode_config(active))
+        command_activate(self.args(), self.suite, self.paths, self.runtime)
+        self.assertEqual(json.loads(self.paths.config_file.read_text())["bar"]["position"], "top")
+
+    def test_deactivate_activate_restores_picker_provider(self) -> None:
+        self.install()
+        for provider in ("tanzaku", "hearthstone", "omarchy"):
+            with self.subTest(provider=provider):
+                config = json.loads(self.paths.config_file.read_text())
+                picker = {"imageStyle": provider, "mediaStyle": "hearthstone"}
+                state_entry(config)["shibumi"]["picker"] = picker
+                atomic_write(self.paths.config_file, encode_config(config))
+                for _ in range(2):  # An already inactive host must not overwrite memory.
+                    self.assertEqual(command_deactivate(self.args(), self.suite, self.paths, self.runtime), 0)
+                    inactive = json.loads(self.paths.config_file.read_text())
+                    self.assertEqual(state_entry(inactive)["shibumi"]["picker"],
+                                     {**picker, "imageStyle": "omarchy"})
+                self.assertEqual(command_activate(self.args(), self.suite, self.paths, self.runtime), 0)
+                active = json.loads(self.paths.config_file.read_text())
+                self.assertEqual(state_entry(active)["shibumi"]["picker"], picker)
+
+    def test_uninstall_refuses_invalid_menu_before_mutation(self) -> None:
+        self.install()
+        menu = self.paths.menu_extension_file
+        state_file = self.paths.state_dir / "install.json"
+        state_before = state_file.read_bytes()
+        config_before = self.paths.config_file.read_bytes()
+        events_before = list(self.runtime.events)
+        transactions = list(self.paths.state_dir.glob("transactions/*"))
+        for raw in ('{"broken": }', menu.read_text().replace(
+                "{\n", '{\n  "one": {}\n  "two": {},\n', 1)):
+            with self.subTest(raw=raw):
+                menu.write_text(raw)
+                with self.assertRaises(CliError) as caught:
+                    command_uninstall(self.args(yes=True), self.suite, self.paths, self.runtime)
+                self.assertIn("invalid Omarchy menu extension JSONC", str(caught.exception))
+                self.assertIn(str(menu), str(caught.exception))
+                self.assertIn("move this file aside, then retry uninstall", str(caught.exception))
+                self.assertEqual(state_file.read_bytes(), state_before)
+                self.assertEqual(self.paths.config_file.read_bytes(), config_before)
+                self.assertEqual(menu.read_text(), raw)
+                self.assertEqual(self.runtime.events, events_before)
+                self.assertEqual(list(self.paths.state_dir.glob("transactions/*")), transactions)
 
     def test_uninstall_preserves_existing_menu_extension(self) -> None:
         extension = self.paths.menu_extension_file
@@ -2123,7 +3068,9 @@ class SuiteLifecycleTests(unittest.TestCase):
         base = json.loads(self.defaults.read_text(encoding="utf-8"))
         base["bar"]["position"] = "left"
         profile = self.suite.profile("default")
-        result = apply_profile(base, profile, self.suite.plugins)
+        result = apply_profile(
+            base, profile, self.suite.plugins, self.paths.plugin_dir
+        )
         layout_ids = {
             entry_id(entry)
             for region in ("left", "center", "right")
@@ -2136,7 +3083,9 @@ class SuiteLifecycleTests(unittest.TestCase):
     def test_profile_excludes_stock_widgets_and_keeps_third_party_extras(self) -> None:
         base = json.loads(self.defaults.read_text(encoding="utf-8"))
         profile = self.suite.profile("default")
-        result = apply_profile(base, profile, self.suite.plugins)
+        result = apply_profile(
+            base, profile, self.suite.plugins, self.paths.plugin_dir
+        )
         layout_ids = {
             entry_id(entry)
             for region in ("left", "center", "right")
@@ -2147,6 +3096,102 @@ class SuiteLifecycleTests(unittest.TestCase):
         self.assertFalse(
             any(plugin_id.startswith("omarchy.") for plugin_id in layout_ids)
         )
+
+    def test_install_prunes_only_foreign_layout_ids_without_plugin_directories(
+        self,
+    ) -> None:
+        config = json.loads(self.defaults.read_text(encoding="utf-8"))
+        config["bar"]["layout"]["right"].extend([
+            {"id": "foreign.orphan"}, {"id": "foreign.installed"},
+            {"id": "foreign.file"}, {"id": "foreign.link"},
+            {"id": "foreign.dangling"},
+            {"id": "hancore.shibumi.bluetooth", "custom": "managed"},
+        ])
+        atomic_write(self.paths.config_file, encode_config(config))
+        self.paths.plugin_dir.mkdir(parents=True)
+        (self.paths.plugin_dir / "foreign.installed").mkdir()
+        (self.paths.plugin_dir / "foreign.file").write_text("not a plugin\n")
+        (self.paths.plugin_dir / "foreign.link").symlink_to("foreign.installed")
+        (self.paths.plugin_dir / "foreign.dangling").symlink_to("missing")
+
+        self.assertEqual(
+            command_install(self.args(), self.suite, self.paths, self.runtime), 0
+        )
+        written = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+        entries = {
+            entry_id(entry): entry
+            for region in ("left", "center", "right")
+            for entry in written["bar"]["layout"][region]
+        }
+        self.assertNotIn("foreign.orphan", entries)
+        self.assertNotIn("foreign.file", entries)
+        self.assertIn("foreign.installed", entries)
+        self.assertIn("foreign.link", entries)
+        self.assertIn("foreign.dangling", entries)
+        self.assertEqual(entries["hancore.shibumi.bluetooth"]["custom"], "managed")
+
+    def test_previous_bar_restore_prunes_orphans_but_unreadable_root_preserves_all(
+        self,
+    ) -> None:
+        self.install()
+        state_path = self.paths.state_dir / "install.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["previousBar"]["layout"]["right"].extend([
+            {"id": "foreign.restore-orphan"},
+            {"id": "omarchy.absent-official"},
+        ])
+        atomic_write(state_path, encode_config(state))
+
+        self.assertEqual(
+            command_deactivate(self.args(), self.suite, self.paths, self.runtime), 0
+        )
+        restored = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+        restored_ids = {
+            entry_id(entry)
+            for region in ("left", "center", "right")
+            for entry in restored["bar"]["layout"][region]
+        }
+        self.assertNotIn("foreign.restore-orphan", restored_ids)
+        self.assertIn("omarchy.absent-official", restored_ids)
+
+        restored["bar"]["layout"]["right"].append({"id": "foreign.unreadable"})
+        # Exercise legacy/profile import, not the exact retained-layout branch
+        # now created by managed deactivate (which must not import stock extras).
+        state_entry(restored).pop("shibumiRetainedLayout", None)
+        atomic_write(self.paths.config_file, encode_config(restored))
+        real_scandir = os.scandir
+        failed_reads = 0
+
+        def fail_two_catalog_reads(path: object) -> object:
+            nonlocal failed_reads
+            if path == self.paths.plugin_dir and failed_reads < 2:
+                failed_reads += 1
+                raise PermissionError("fixture plugin directory unreadable")
+            return real_scandir(path)
+
+        with patch.object(config_module.os, "scandir", side_effect=fail_two_catalog_reads):
+            self.assertEqual(
+                command_activate(self.args(), self.suite, self.paths, self.runtime), 0
+            )
+        self.assertEqual(failed_reads, 2)
+        active = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+        self.assertTrue(any(
+            entry_id(entry) == "foreign.unreadable"
+            for region in ("left", "center", "right")
+            for entry in active["bar"]["layout"][region]
+        ))
+
+        self.assertEqual(
+            command_uninstall(self.args(), self.suite, self.paths, self.runtime), 0
+        )
+        final = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+        final_ids = {
+            entry_id(entry)
+            for region in ("left", "center", "right")
+            for entry in final["bar"]["layout"][region]
+        }
+        self.assertNotIn("foreign.unreadable", final_ids)
+        self.assertIn("omarchy.absent-official", final_ids)
 
     def test_locked_migration_preserves_legacy_state_before_shell_drain(
         self,
@@ -2399,6 +3444,88 @@ class SuiteLifecycleTests(unittest.TestCase):
             else:
                 self.assertIs(type(state_entry(migrate_state_settings(config))["shibumi"]["version"]), int)
 
+    def test_foreign_layout_keep_settings_round_trip(self) -> None:
+        """Real lifecycle transforms: .140 stock duplicates, V1 extras and V2 slots."""
+        foreign_ids = {"hancore.omaq", "basecamp", "hey"}
+        stock = json.loads(self.defaults.read_text())
+        stock["bar"]["layout"] = {
+            "left": [{"id": "hancore.omaq", "side": "stock-left"}, {"id": "basecamp"}],
+            "center": [], "right": [{"id": "hancore.omaq"}, {"id": "hey"}]}
+        for plugin in foreign_ids:
+            (self.paths.plugin_dir / plugin).mkdir(parents=True, exist_ok=True)
+        for style in ("shibumi", "full", "fit", "dock", "notch"):
+            atomic_write(self.paths.config_file, encode_config(stock))
+            self.assertEqual(command_install(self.args(), self.suite, self.paths, self.runtime), 0)
+            before = json.loads(self.paths.config_file.read_text())
+            with self.subTest(style=style, phase="fresh-import"):
+                foreign = {r: [e for e in entries if entry_id(e) in foreign_ids]
+                           for r, entries in before["bar"]["layout"].items()}
+                self.assertEqual(foreign, {"left": stock["bar"]["layout"]["left"],
+                                          "center": [], "right": [{"id": "hey"}]})
+            stale_record = {"schemaVersion": 1, "layout": copy.deepcopy(before["bar"]["layout"])}
+            for region in ("left", "center", "right"):
+                before["bar"]["layout"][region] = [e for e in before["bar"]["layout"][region]
+                    if entry_id(e) not in foreign_ids]
+            before["bar"]["layout"]["left"].reverse()
+            before["bar"]["layout"]["right"] += [{"id": "hancore.omaq", "opaque": [False, "Malmö"]}, {"id": "hey"}]
+            settings = state_entry(before)["shibumi"]
+            settings["presentation"] = {"shellStyle": style}
+            # V1 has no foreign group positions: these widgets use the Extra-Deck.
+            settings["order"] = {"left": ["G1", "G2", "G3", "G4", "G5", "G6", "G7"],
+                "center": ["G8"], "right": ["G9", "G10", "G11", "G14", "G12", "G13", "G15"]}
+            settings["v2Layout"] = {
+                "left": ["G1", "G2", "G3", "", "G5", "G6", "G4", "G7", "", ""], "center": ["G8"],
+                "right": ["G9", "G10", "G11", "G14", "G12", "G13", "G16", "G18", "G17", "G15", "G:hancore.omaq", "G:hey", ""]}
+            entry_bytes = encode_config(state_entry(before))
+            # An older release preserves this unknown sibling after reinstall.
+            state_entry(before)["shibumiRetainedLayout"] = stale_record
+            atomic_write(self.paths.config_file, encode_config(before))
+            with self.subTest(style=style, phase="stale-repair"):
+                self.assertEqual(command_repair(self.args(), self.suite, self.paths, self.runtime), 0)
+                repaired = json.loads(self.paths.config_file.read_text())
+                self.assertEqual(repaired["bar"]["layout"], before["bar"]["layout"])
+                self.assertEqual(encode_config(state_entry(repaired)), entry_bytes)
+            # Reintroduce the stale sibling: uninstall must replace it, not refuse.
+            atomic_write(self.paths.config_file, encode_config(before))
+            self.assertEqual(command_uninstall(self.args(keep_settings=True), self.suite, self.paths, self.runtime), 0)
+            kept = json.loads(self.paths.config_file.read_text())
+            with self.subTest(style=style, phase="kept"):
+                self.assertEqual(kept["bar"]["layout"], stock["bar"]["layout"])
+                expected = {**state_entry(before), "shibumiRetainedLayout": {
+                    "schemaVersion": 1, "layout": before["bar"]["layout"]}}
+                self.assertEqual(state_entry(kept), expected)
+                self.assertNotIn("shibumiRetainedLayout", kept)
+            kept["idle"] = {"enabled": False, "future": {"minutes": 17}}
+            kept["plugins"].append({"id": "local.stock-service", "opaque": [False, "Malmö"]})
+            kept["bar"]["layout"]["left"][1]["stockOption"] = "changed"
+            atomic_write(self.paths.config_file, encode_config(kept))
+            real_restart = self.runtime.restart_shell
+            def inspect_before_load() -> None:
+                current = json.loads(self.paths.config_file.read_text())
+                self.assertEqual(encode_config(state_entry(current)), entry_bytes)
+                real_restart()
+            with patch.object(self.runtime, "restart_shell", side_effect=inspect_before_load):
+                self.assertEqual(command_install(self.args(), self.suite, self.paths, self.runtime), 0)
+            after = json.loads(self.paths.config_file.read_text())
+            with self.subTest(style=style, phase="reinstalled"):
+                self.assertEqual(after["bar"]["layout"], before["bar"]["layout"])
+                self.assertEqual(encode_config(state_entry(after)), entry_bytes)
+                self.assertEqual(after["idle"], kept["idle"])
+                self.assertIn(kept["plugins"][-1], after["plugins"])
+                self.assertEqual(load_install_state(self.paths, self.suite)["previousBar"], kept["bar"])
+            self.assertEqual(command_uninstall(self.args(keep_settings=True), self.suite, self.paths, self.runtime), 0)
+            external_bar = json.loads(self.paths.config_file.read_text())["bar"]
+            self.assertEqual(command_install(self.args(no_activate=True, keep_layout=True), self.suite, self.paths, self.runtime), 0)
+            external = json.loads(self.paths.config_file.read_text())
+            self.assertEqual(external["bar"], external_bar)
+            self.assertEqual(encode_config(state_entry(external)), entry_bytes)
+            state_entry(external)["shibumiRetainedLayout"] = stale_record
+            atomic_write(self.paths.config_file, encode_config(external))
+            self.assertEqual(command_deactivate(self.args(), self.suite, self.paths, self.runtime), 0)
+            self.assertNotIn("shibumiRetainedLayout", state_entry(json.loads(self.paths.config_file.read_text())))
+            self.assertEqual(command_uninstall(self.args(), self.suite, self.paths, self.runtime), 0)
+            self.assertIsNone(state_entry(json.loads(self.paths.config_file.read_text())))
+
     def test_state_storage_keeps_complete_entry_through_uninstall_reinstall(self) -> None:
         self.install()
         config = json.loads(self.paths.config_file.read_text())
@@ -2407,13 +3534,19 @@ class SuiteLifecycleTests(unittest.TestCase):
         entry["shibumi"]["picker"] = {"imageStyle": "tanzaku", "mediaStyle": "hearthstone"}
         entry["shibumi"]["widgets"] = {"G8": {"omarchy.clock": {"format": "HH:mm", "deep": [3, 2, 1]}}}
         retained = copy.deepcopy(entry)
+        for section in ("centerBegin", "centerEnd", "tray"):
+            config["bar"]["layout"][section] = [{"id": "omarchy.clock", "opaque": [section, False, "Malmö"]}]
         atomic_write(self.paths.config_file, encode_config(config))
         self.assertEqual(command_uninstall(self.args(keep_settings=True), self.suite, self.paths, self.runtime), 0)
         kept = json.loads(self.paths.config_file.read_text())
-        self.assertEqual(state_entry(kept), retained)
+        self.assertEqual(state_entry(kept), {**retained, "shibumiRetainedLayout": {
+            "schemaVersion": 1, "layout": config["bar"]["layout"]}})
         self.assertFalse((self.paths.plugin_dir / "hancore.shibumi.state").exists())
+        for section in ("centerBegin", "centerEnd", "tray"):
+            self.assertEqual(kept["bar"]["layout"][section], config["bar"]["layout"][section])
         self.assertEqual(command_install(self.args(), self.suite, self.paths, self.runtime), 0)
         self.assertEqual(state_entry(json.loads(self.paths.config_file.read_text())), retained)
+        self.assertEqual(json.loads(self.paths.config_file.read_text())["bar"]["layout"], config["bar"]["layout"])
 
     def test_state_migration_refuses_corruption_and_does_not_resurrect_legacy(self) -> None:
         config = {"version": 1, "bar": {"id": "omarchy.bar", "shibumi": {"version": 1, "legacy": True}},
@@ -2421,6 +3554,9 @@ class SuiteLifecycleTests(unittest.TestCase):
         migrated = migrate_state_settings(config)
         self.assertEqual(state_entry(migrated)["foreign"], {"value": 7})
         self.assertEqual(migrate_state_settings(migrated), migrated)
+        shadow = copy.deepcopy(migrated)
+        shadow["bar"]["layout"]["centerEnd"] = ["hancore.shibumi.state"]
+        with self.assertRaises(ConfigError): state_entry(shadow)
         corrupt = copy.deepcopy(migrated)
         state_entry(corrupt)["shibumiStateSchemaVersion"] = 2
         with self.assertRaises(ConfigError):
@@ -2871,6 +4007,8 @@ class SuiteLifecycleTests(unittest.TestCase):
         self.assertEqual(
             active_state["activation"]["layoutPolicy"], "managed"
         )
+        expected_bar = copy.deepcopy(base["bar"])  # Original predecessor, not later external edits.
+        expected_bar["layout"]["right"].pop()  # Shibumi Bluetooth is not a stock widget.
         self.assertEqual(active_state["previousBar"], expected_bar)
 
         # Activating an already managed bar must not replace the external
@@ -3034,6 +4172,121 @@ class SuiteLifecycleTests(unittest.TestCase):
             state["activation"]["configuredBar"], installed["bar"]["id"]
         )
         self.assertEqual(installed["bar"]["foreignOwnerState"], {"serial": 23})
+
+    def test_orphan_managed_install_preserves_changed_post_stop_bar(self) -> None:
+        self.write_orphan_shibumi_config()
+        original_stop = self.runtime.stop_shell
+        final_bar: dict[str, object] = {}
+
+        def stop_after_bar_save() -> None:
+            nonlocal final_bar
+            original_stop()
+            config = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+            config["bar"]["id"] = "third.party.after-stop"
+            config["bar"]["foreignOwnerState"] = {"serial": 29}
+            final_bar = copy.deepcopy(config["bar"])
+            atomic_write(self.paths.config_file, encode_config(config))
+
+        with patch.object(
+            self.runtime, "stop_shell", side_effect=stop_after_bar_save
+        ):
+            self.assertEqual(
+                command_install(self.args(), self.suite, self.paths, self.runtime),
+                0,
+            )
+
+        self.assertEqual(
+            load_install_state(self.paths, self.suite)["previousBar"], final_bar
+        )
+
+    def assert_post_stop_shibumi_transition_uses_stock(
+        self, initial_bar_id: str | None
+    ) -> None:
+        base = json.loads(self.defaults.read_text(encoding="utf-8"))
+        if initial_bar_id is not None:
+            base["bar"]["id"] = initial_bar_id
+        atomic_write(self.paths.config_file, encode_config(base))
+        expected_bar = copy.deepcopy(
+            json.loads(self.defaults.read_text(encoding="utf-8"))["bar"]
+        )
+        expected_bar["id"] = "omarchy.bar"
+        original_stop = self.runtime.stop_shell
+
+        def stop_after_shibumi_save() -> None:
+            original_stop()
+            config = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+            config["bar"]["id"] = "hancore.shibumi.bar"
+            atomic_write(self.paths.config_file, encode_config(config))
+
+        with patch.object(
+            self.runtime, "stop_shell", side_effect=stop_after_shibumi_save
+        ):
+            self.assertEqual(
+                command_install(self.args(), self.suite, self.paths, self.runtime),
+                0,
+            )
+
+        self.assertEqual(
+            load_install_state(self.paths, self.suite)["previousBar"], expected_bar
+        )
+        self.assertEqual(
+            command_deactivate(self.args(), self.suite, self.paths, self.runtime), 0
+        )
+        restored = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+        self.assertEqual(restored["bar"]["id"], "omarchy.bar")
+
+    def test_stock_to_shibumi_during_stop_records_stock_and_deactivates(
+        self,
+    ) -> None:
+        self.assert_post_stop_shibumi_transition_uses_stock(None)
+
+    def test_third_party_to_shibumi_during_stop_records_stock_and_deactivates(
+        self,
+    ) -> None:
+        self.assert_post_stop_shibumi_transition_uses_stock("third.party.before-stop")
+
+    def test_post_stop_shibumi_rejects_new_invalid_defaults_before_exposure(
+        self,
+    ) -> None:
+        base = json.loads(self.defaults.read_text(encoding="utf-8"))
+        base["bar"]["id"] = "third.party.before-stop"
+        atomic_write(self.paths.config_file, encode_config(base))
+        original_stop = self.runtime.stop_shell
+        original_expose = PluginTransaction.expose
+        transitioned = False
+
+        def stop_after_invalid_default_save() -> None:
+            nonlocal transitioned
+            original_stop()
+            if transitioned:
+                return
+            config = json.loads(self.paths.config_file.read_text(encoding="utf-8"))
+            config["bar"]["id"] = "hancore.shibumi.bar"
+            atomic_write(self.paths.config_file, encode_config(config))
+            self.defaults.write_bytes(b"{")
+            transitioned = True
+
+        def recording_expose(transaction: PluginTransaction) -> None:
+            self.runtime.events.append("expose")
+            original_expose(transaction)
+
+        with patch.object(
+            self.runtime, "stop_shell", side_effect=stop_after_invalid_default_save
+        ), patch.object(PluginTransaction, "expose", recording_expose):
+            with self.assertRaises(ConfigError):
+                command_install(self.args(), self.suite, self.paths, self.runtime)
+
+        self.assertEqual(self.runtime.events, ["stop", "stop", "restart"])
+        self.assertTrue(self.runtime.shell_running)
+        self.assertFalse(
+            any(
+                (self.paths.plugin_dir / plugin_id).exists()
+                for plugin_id in self.suite.plugins
+            )
+        )
+        self.assertTrue(self.paths.plugin_dir.is_dir())
+        self.assertFalse(self.hidden_transaction_paths())
+        self.assertFalse((self.paths.state_dir / "install.json").exists())
 
     def test_managed_install_drains_before_publish_without_rescan(self) -> None:
         original_expose = PluginTransaction.expose
@@ -3694,6 +4947,54 @@ class SuiteLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "manifest drifts"):
             Suite.load(self.source)
 
+    def test_keep_layout_round_trip_and_poisoned_predecessor(self) -> None:
+        self.install()
+        previous = load_install_state(self.paths, self.suite)["previousBar"]
+        config = json.loads(self.paths.config_file.read_text())
+        config["bar"]["layout"]["right"] = [entry for entry in config["bar"]["layout"]["right"] if entry_id(entry) in self.suite.plugins]
+        state_entry(config)["shibumi"]["picker"] = {"imageStyle": "tanzaku"}
+        atomic_write(self.paths.config_file, encode_config(config))
+        self.assertEqual(command_deactivate(self.args(keep_layout=True), self.suite, self.paths, self.runtime), 0)
+        poisoned_bar = json.loads(self.paths.config_file.read_text())["bar"]
+        self.assertTrue(all(entry_id(entry) in self.suite.plugins for entries in poisoned_bar["layout"].values() for entry in entries))
+        self.assertEqual(poisoned_bar["centerAnchor"], "hancore.shibumi.center")
+        self.assertEqual(command_activate(self.args(), self.suite, self.paths, self.runtime), 0)
+        self.assertEqual(load_install_state(self.paths, self.suite)["previousBar"], previous)
+        self.assertEqual(state_entry(json.loads(self.paths.config_file.read_text()))["shibumi"]["picker"]["imageStyle"], "tanzaku")
+        for predecessor in ("original", "poisoned", "missing"):
+            with self.subTest(predecessor=predecessor):
+                if predecessor != "original":
+                    self.assertEqual(command_activate(self.args(), self.suite, self.paths, self.runtime), 0)
+                    state = load_install_state(self.paths, self.suite)
+                    if predecessor == "poisoned":
+                        state["previousBar"] = poisoned_bar
+                    else:
+                        state.pop("previousBar", None)
+                    atomic_write(self.paths.state_dir / "install.json", encode_config(state))
+                    if predecessor == "missing":
+                        self.assertEqual(command_deactivate(self.args(keep_layout=True), self.suite, self.paths, self.runtime), 0)
+                        self.assertEqual(command_activate(self.args(), self.suite, self.paths, self.runtime), 0)
+                        self.assertNotIn("previousBar", load_install_state(self.paths, self.suite))
+                self.assertEqual(command_deactivate(self.args(), self.suite, self.paths, self.runtime), 0)
+                inactive = json.loads(self.paths.config_file.read_text())
+                self.assertEqual(inactive["bar"].get("id", "omarchy.bar"), "omarchy.bar")
+                layout = inactive["bar"]["layout"]
+                ids = {entry_id(entry) for entries in layout.values() for entry in entries}
+                self.assertFalse((ids & set(self.suite.plugins)) - CONTINUITY_PLUGIN_IDS)
+                self.assertEqual(ids, {"omarchy.menu", "omarchy.clock", "local.extra", "hancore.shibumi.control-center"})
+                self.assertNotIn(inactive["bar"].get("centerAnchor"), self.suite.plugins)
+                if predecessor != "original":
+                    self.assertEqual(layout, clean_layout)
+                else:
+                    clean_layout = layout
+                    self.assertEqual(load_install_state(self.paths, self.suite)["previousBar"], previous)
+        self.assertEqual(command_activate(self.args(), self.suite, self.paths, self.runtime), 0)
+        self.assertEqual(command_uninstall(self.args(), self.suite, self.paths, self.runtime), 0)
+        uninstalled = json.loads(self.paths.config_file.read_text())["bar"]
+        ids = {entry_id(entry) for entries in uninstalled["layout"].values() for entry in entries}
+        self.assertFalse(ids & set(self.suite.plugins))
+        self.assertNotIn(uninstalled.get("centerAnchor"), self.suite.plugins)
+
     def test_deactivate_activate_round_trip_preserves_user_state_and_payload(self) -> None:
         self.install()
         state_before = (self.paths.state_dir / "install.json").read_bytes()
@@ -3707,6 +5008,10 @@ class SuiteLifecycleTests(unittest.TestCase):
         config["bar"]["layout"]["right"].append(
             {"id": "user.weather", "custom": {"city": "Berlin"}}
         )
+        (self.paths.plugin_dir / "user.weather").mkdir()
+        config["bar"]["layout"]["right"].append({"id": "omarchy.elsewhen",
+            "displayMode": "full", "opaque": [False, {"city": "Malmö"}]})
+        placed_layout = copy.deepcopy(config["bar"]["layout"])
         config["plugins"].append({"id": "user.service", "interval": 17})
         state_entry(config)["shibumi"]["testSetting"] = "retained"
         atomic_write(self.paths.config_file, encode_config(config))
@@ -3761,6 +5066,23 @@ class SuiteLifecycleTests(unittest.TestCase):
             if entry_id(entry) == "user.service"
         )
         self.assertEqual(user_service["interval"], 17)
+        for enabled in (True, False):
+            expected_layout = copy.deepcopy(placed_layout)
+            codes = (0, 0)
+            if not enabled:
+                deactivated = command_deactivate(self.args(), self.suite, self.paths, self.runtime)
+                stock = json.loads(self.paths.config_file.read_text())
+                # Native widget disable removes its placement, not its package.
+                for region in stock["bar"]["layout"]:
+                    stock["bar"]["layout"][region] = [entry for entry in stock["bar"]["layout"][region]
+                        if entry_id(entry) != "omarchy.elsewhen"]
+                    expected_layout[region] = [entry for entry in expected_layout[region]
+                        if entry_id(entry) != "omarchy.elsewhen"]
+                atomic_write(self.paths.config_file, encode_config(stock))
+                codes = (deactivated, command_activate(self.args(), self.suite, self.paths, self.runtime))
+                active = json.loads(self.paths.config_file.read_text())
+            self.assertEqual((codes, active["bar"]["layout"], state_entry(active).get("shibumiRetainedLayout")),
+                ((0, 0), expected_layout, None), "native placement must survive unless disabled while inactive")
 
     def test_failed_deactivation_restores_config_and_install_state(self) -> None:
         self.install()

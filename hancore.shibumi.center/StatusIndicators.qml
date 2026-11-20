@@ -100,8 +100,9 @@ Item {
       width: implicitWidth
       height: implicitHeight
 
-      Text {
+      Presentation.BarGlyph {
         id: idleIcon
+        nativeText: "󰅶"
         anchors.centerIn: parent
         text: "\udb86\uded6"
         color: root.contentColor
@@ -129,7 +130,7 @@ Item {
       width: implicitWidth
       height: implicitHeight
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
         id: dndIcon
         anchors.centerIn: parent
         anchors.horizontalCenterOffset: root.dndOpticalCenterOffset
@@ -181,14 +182,23 @@ Item {
           height: width
           text: "󰻂"
           color: root.recordingIconColor
-          fontFamily: root.bar ? root.bar.fontFamily : Commons.Style.font.family
-          fontSize: 13
+          fontFamily: Commons.Style.font.family
+          fontSize: Commons.Style.bar.iconFont
 
-          SequentialAnimation on opacity {
+          Timer {
+            interval: 100
+            repeat: true
             running: recordingIndicator.visible
-            loops: Animation.Infinite
-            NumberAnimation { to: 0.25; duration: 600; easing.type: Easing.InOutSine }
-            NumberAnimation { to: 1; duration: 600; easing.type: Easing.InOutSine }
+            property double startedAt: 0
+            onRunningChanged: if (running) {
+              startedAt = Date.now()
+              recordingIcon.opacity = 1
+            }
+            onTriggered: {
+              // Sample the 1200 ms InOutSine cycle, not every display frame.
+              const elapsed = Math.round((Date.now() - startedAt) / interval) * interval
+              recordingIcon.opacity = 0.25 + 0.75 * (1 + Math.cos(2 * Math.PI * (elapsed % 1200) / 1200)) / 2
+            }
           }
         }
 
@@ -224,7 +234,7 @@ Item {
       width: implicitWidth
       height: implicitHeight
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
         id: voxtypeIcon
         anchors.centerIn: parent
         text: root.statusService && root.statusService.voxtypeState === "recording"
@@ -236,12 +246,21 @@ Item {
               root.contentColor.b, 0.68)
         font.pixelSize: 14
 
-        SequentialAnimation on opacity {
+        Timer {
+          interval: 100
+          repeat: true
           running: voxtypeIndicator.visible && root.statusService
             && root.statusService.voxtypeState === "recording"
-          loops: Animation.Infinite
-          NumberAnimation { to: 0.35; duration: 600; easing.type: Easing.InOutSine }
-          NumberAnimation { to: 1; duration: 600; easing.type: Easing.InOutSine }
+          property double startedAt: 0
+          onRunningChanged: if (running) {
+            startedAt = Date.now()
+            voxtypeIcon.opacity = 1
+          }
+          onTriggered: {
+            // Same sampled InOutSine as recording, with its original minimum.
+            const elapsed = Math.round((Date.now() - startedAt) / interval) * interval
+            voxtypeIcon.opacity = 0.35 + 0.65 * (1 + Math.cos(2 * Math.PI * (elapsed % 1200) / 1200)) / 2
+          }
         }
       }
 

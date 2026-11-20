@@ -13,7 +13,7 @@ import re
 from scripts.qml_import_lexer import ImportLexError, tokens
 
 MODULE = Path("hancore.shibumi.state/runtime")
-MODULE_FILES = frozenset({"qmldir", "Runtime.qml", "Provider.qml", "HostShell.qml"})
+MODULE_FILES = frozenset({"qmldir", "Runtime.qml", "Provider.qml", "HostShell.qml", "HostContract.qml"})
 IMPORTERS = frozenset({
     "hancore.shibumi.ai/Service.qml",
     "hancore.shibumi.audio/BarWidget.qml",
@@ -32,10 +32,12 @@ IMPORTERS = frozenset({
     "hancore.shibumi.media/Service.qml",
     "hancore.shibumi.memory/BarWidget.qml",
     "hancore.shibumi.network/Service.qml",
+    "hancore.shibumi.network/NetworkPanelBridge.qml",
     "hancore.shibumi.power-profile/BarWidget.qml",
     "hancore.shibumi.power-state/Service.qml",
     "hancore.shibumi.quick-access/Service.qml",
     "hancore.shibumi.reactor/Service.qml",
+    "hancore.shibumi.reactor/BoundedTextSource.qml",
     "hancore.shibumi.status/Service.qml",
     "hancore.shibumi.storage/BarWidget.qml",
     "hancore.shibumi.storage/Service.qml",
@@ -49,10 +51,15 @@ IMPORTERS = frozenset({
 PRESENTATION_MODULE = Path("hancore.shibumi.state/lib/presentation")
 PRESENTATION_MODULE_FILES = frozenset({
     "qmldir",
+    "BarGlyph.qml",
+    "BarInk.qml",
+    "BarSymbols.js",
     "ControlCenterIconText.qml",
     "HostTokens.qml",
     "IconText.qml",
+    "InkRow.qml",
     "PacmanWorkspaceMarker.qml",
+    "PanelHeading.qml",
     "PillSurface.qml",
     "ShibumiPanelToolTip.qml",
     "ShibumiPillToolTip.qml",
@@ -70,9 +77,11 @@ PRESENTATION_IMPORTERS = frozenset({
     "hancore.shibumi.brightness/BrightnessPanel.qml",
     "hancore.shibumi.center/BarWidget.qml",
     "hancore.shibumi.center/CalendarPanel.qml",
+    "hancore.shibumi.center/ClockWidget.qml",
     "hancore.shibumi.center/StatusIndicators.qml",
     "hancore.shibumi.center/SystemUpdateWidget.qml",
     "hancore.shibumi.center/WeatherPanel.qml",
+    "hancore.shibumi.center/WeatherWidget.qml",
     "hancore.shibumi.control-center/ActiveBarSettingsPage.qml",
     "hancore.shibumi.control-center/AppearanceWidgetTile.qml",
     "hancore.shibumi.control-center/BarWidget.qml",
@@ -92,6 +101,7 @@ PRESENTATION_IMPORTERS = frozenset({
     "hancore.shibumi.control-center/WorkspaceMarkerPreviewCard.qml",
     "hancore.shibumi.cpu/BarWidget.qml",
     "hancore.shibumi.gpu/BarWidget.qml",
+    "hancore.shibumi.gpu/GpuPanel.qml",
     "hancore.shibumi.media/BarWidget.qml",
     "hancore.shibumi.media/MediaPanel.qml",
     "hancore.shibumi.memory/BarWidget.qml",
@@ -113,6 +123,8 @@ PRESENTATION_IMPORTERS = frozenset({
     "hancore.shibumi.status/TrayStatusView.qml",
     "hancore.shibumi.storage/BarWidget.qml",
     "hancore.shibumi.temperature/BarWidget.qml",
+    "hancore.shibumi.temperature/TemperaturePanel.qml",
+    "hancore.shibumi.update-center/BarWidget.qml",
     "hancore.shibumi.update-center/PanelButton.qml",
     "hancore.shibumi.update-center/ThemesTab.qml",
     "hancore.shibumi.update-center/UpdateCenterPanel.qml",

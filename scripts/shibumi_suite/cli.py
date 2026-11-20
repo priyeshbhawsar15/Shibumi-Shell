@@ -25,13 +25,16 @@ from .config import (
     entry_id,
     migrate_legacy_config,
     migrate_state_settings,
+    native_sections,
     validate_state_settings,
+    parse_config_bytes,
     read_config,
     reconcile_profile_additions,
     reconcile_profile_services,
     remove_plugin_ids,
     remove_suite,
     select_omarchy_image_picker,
+    state_entry,
 )
 from .model import (
     ContractError,
@@ -41,8 +44,13 @@ from .model import (
     suite_payload_digest,
 )
 from .menu_extension import (
+    END_MARKER,
+    START_MARKER,
+    MenuExtensionError,
+    StockMenuError,
     generated_extension_is_empty,
     install_picker_routing,
+    preflight_picker_removal,
     read_extension,
     remove_picker_routing,
 )
@@ -51,6 +59,7 @@ from .transaction import (
     PluginTransaction,
     SuiteLock,
     TransactionError,
+    _read_bounded_regular_path,
     is_managed_target,
     preflight_legacy_removals,
     preflight_removals,
@@ -279,15 +288,57 @@ def make_install_state(
     return result
 
 
-def previous_bar_for_state(
-    state: dict[str, Any], defaults: dict[str, Any]
+def strip_suite_bar(
+    bar: dict[str, Any], plugin_ids: set[str], *, continuity: bool = True
 ) -> dict[str, Any]:
-    """Return the pre-Shibumi bar or a Quattro default for older state files."""
+    result = copy.deepcopy(bar)
+    layout = result.get("layout", {})
+    for region in native_sections(layout):
+        if region in layout:
+            layout[region] = [entry for entry in layout[region]
+                              if entry_id(entry) not in plugin_ids - (CONTINUITY_PLUGIN_IDS if continuity else set())]
+    if result.get("centerAnchor") in plugin_ids:
+        result.pop("centerAnchor")
+    return result
+
+
+def has_stock_widgets(bar: dict[str, Any], plugin_ids: set[str]) -> bool:
+    return any(entry_id(entry) not in plugin_ids
+               for region in ("left", "center", "right") for entry in bar.get("layout", {}).get(region, []))
+
+
+def previous_bar_for_state(
+    state: dict[str, Any], defaults: dict[str, Any], suite: Suite,
+    *, continuity: bool = True,
+) -> dict[str, Any]:
+    """Return a sanitized predecessor with stock widgets, or the host default."""
+    plugin_ids = set(suite.plugins)
     previous = state.get("previousBar")
     if isinstance(previous, dict):
-        return copy.deepcopy(previous)
+        previous = strip_suite_bar(previous, plugin_ids, continuity=continuity)
+        if has_stock_widgets(previous, plugin_ids):
+            return previous
     fallback = defaults.get("bar")
-    return copy.deepcopy(fallback) if isinstance(fallback, dict) else {}
+    return strip_suite_bar(fallback, plugin_ids, continuity=continuity) if isinstance(fallback, dict) else {}
+
+
+def stock_bar_for_self_reference(paths: RuntimePaths) -> dict[str, Any]:
+    """Read the host default directly; an orphan Shibumi bar is not restorable."""
+    try:
+        defaults = parse_config_bytes(
+            paths.defaults_file.read_bytes(), paths.defaults_file,
+            user_config_exists=True,
+        )[0]
+    except OSError as error:
+        raise ConfigError(f"cannot read shell config {paths.defaults_file}: {error}") from error
+    bar = defaults.get("bar")
+    if not isinstance(bar, dict):
+        raise ConfigError(f"host shell defaults have no bar object: {paths.defaults_file}")
+    if "id" in bar and bar["id"] != "omarchy.bar":
+        raise ConfigError(f"host shell defaults do not select omarchy.bar: {paths.defaults_file}")
+    result = copy.deepcopy(bar)
+    result["id"] = "omarchy.bar"
+    return result
 
 
 def confirm(action: str, assume_yes: bool) -> None:
@@ -324,10 +375,33 @@ def install_picker_menu_extension(
     runtime: OmarchyRuntime,
     previous_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    raw = read_extension(transaction.paths.menu_extension_file)
-    payload = install_picker_routing(raw).encode("utf-8")
+    menu_path = transaction.paths.menu_extension_file
+    stock_path = transaction.paths.omarchy_root / "default/omarchy/omarchy-menu.jsonc"
+    source_path = menu_path
+    try:
+        raw = read_extension(source_path)
+        source_path = stock_path
+        stock_menu = read_extension(source_path)
+        source_path = menu_path
+        warnings: list[str] = []
+        payload = install_picker_routing(raw, stock_menu, warnings=warnings).encode("utf-8")
+    except MenuExtensionError as error:
+        if isinstance(error, StockMenuError):
+            source_path = stock_path
+            if not error.unparsable:
+                raise CliError(f"cannot update Omarchy menu {stock_path}: {error}") from error
+        remedy = (
+            "restore the Omarchy stock menu, then retry the same command"
+            if isinstance(error, StockMenuError) and error.unparsable else
+            "check that the stock menu is readable, then retry the same command"
+            if source_path == stock_path else
+            "fix the JSONC syntax or routing markers in this regular file, then retry the same command"
+        )
+        raise CliError(f"cannot update Omarchy menu {source_path}: {error}; {remedy}") from error
     transaction.write_menu_extension(payload)
     runtime.refresh_menu()
+    for warning in warnings:
+        print(f"shibumi-suite: warning: {stock_path}: {warning}", file=sys.stderr)
     previous = (
         previous_state.get("menuExtension")
         if isinstance(previous_state, dict) else None
@@ -377,8 +451,8 @@ def activation_drift(
     layout = bar.get("layout") if isinstance(bar.get("layout"), dict) else {}
     layout_ids = {
         entry_id(entry)
-        for region in ("left", "center", "right")
-        for entry in (layout.get(region) if isinstance(layout.get(region), list) else [])
+        for region in native_sections(layout)
+        for entry in layout.get(region, [])
     }
     service_ids = {entry_id(entry) for entry in config.get("plugins", [])}
     drift: list[str] = []
@@ -454,10 +528,8 @@ def external_runtime_enabled_plugin_ids(
     layout = bar.get("layout") if isinstance(bar.get("layout"), dict) else {}
     enabled = {
         entry_id(entry)
-        for region in ("left", "center", "right")
-        for entry in (
-            layout.get(region) if isinstance(layout.get(region), list) else []
-        )
+        for region in native_sections(layout)
+        for entry in layout.get(region, [])
     }
     enabled.update(
         plugin_id
@@ -522,6 +594,10 @@ def command_install(
     validate_sources(runtime, specs)
     current, _ = read_config(paths.config_file, paths.defaults_file)
     external = args.no_activate and args.keep_layout
+    self_reference_stock = (
+        stock_bar_for_self_reference(paths)
+        if configured_bar_id(current) == "hancore.shibumi.bar" else None
+    )
 
     def desired_for(config: dict[str, Any]) -> dict[str, Any]:
         return remove_plugin_ids((
@@ -532,7 +608,7 @@ def command_install(
             )
             if external
             else apply_identity_contract(
-                apply_profile(config, profile, suite.plugins),
+                apply_profile(config, profile, suite.plugins, paths.plugin_dir),
                 migrate_storage=suite.settings_storage_version == 1,
             )
         ), suite.retired_plugins)
@@ -569,6 +645,9 @@ def command_install(
         transaction.stop_shell()
         current = transaction.refresh_config_after_stop()
         desired = desired_for(current)
+        previous_bar = current.get("bar")
+        if configured_bar_id(current) == "hancore.shibumi.bar":
+            previous_bar = self_reference_stock or stock_bar_for_self_reference(paths)
         desired_state = make_install_state(
             suite,
             list(profile.install),
@@ -580,7 +659,7 @@ def command_install(
             activation_mode="external" if external or user_layout else "managed",
             layout_policy="preserved" if external or user_layout else "managed",
             configured_bar=configured_bar_id(desired),
-            previous_bar=current.get("bar"),
+            previous_bar=previous_bar,
         )
         transaction.expose()
         transaction.stage_removal_ids(suite.retired_plugins)
@@ -674,7 +753,7 @@ def command_migrate(
         transaction.stop_shell()
         current = transaction.refresh_config_after_stop()
         desired = desired_for(current)
-        previous_bar = previous_bar_for_state(legacy_state, defaults)
+        previous_bar = previous_bar_for_state(legacy_state, defaults, suite)
         current_bar = current.get("bar")
         if isinstance(current_bar, dict) and "transparent" in current_bar:
             previous_bar["transparent"] = copy.deepcopy(
@@ -846,7 +925,7 @@ def command_update(
             activation_mode="external" if external else "managed",
             layout_policy="preserved" if external else "managed",
             configured_bar=configured_bar_id(desired),
-            previous_bar=previous_bar_for_state(state, defaults),
+            previous_bar=previous_bar_for_state(state, defaults, suite),
         )
         transaction.expose()
         transaction.stage_removal_ids(retired_installed)
@@ -903,7 +982,7 @@ def command_repair(
             )
             if external
             else apply_identity_contract(
-                apply_profile(config, profile, suite.plugins),
+                apply_profile(config, profile, suite.plugins, paths.plugin_dir),
                 migrate_storage=suite.settings_storage_version == 1,
             )
         ), suite.retired_plugins)
@@ -954,7 +1033,7 @@ def command_repair(
             activation_mode="external" if external else "managed",
             layout_policy="preserved" if external else "managed",
             configured_bar=configured_bar_id(desired),
-            previous_bar=previous_bar_for_state(state, defaults),
+            previous_bar=previous_bar_for_state(state, defaults, suite),
         )
         transaction.expose()
         transaction.stage_removal_ids(retired_installed)
@@ -1013,10 +1092,21 @@ def command_activate(
     def desired_for(config: dict[str, Any]) -> dict[str, Any]:
         if state.get("settingsStorageVersion") == 1:
             config = migrate_state_settings(config, import_legacy=False)
-        return apply_identity_contract(
-            apply_profile(config, profile, suite.plugins),
+        desired = apply_identity_contract(
+            apply_profile(config, profile, suite.plugins, paths.plugin_dir),
             migrate_storage=state.get("settingsStorageVersion") == 1,
         )
+        entry = state_entry(desired)
+        if entry is not None:
+            position = entry.pop("shibumiRetainedPosition", None)
+            if configured_bar_id(config) != profile.active_bar and position in ("top", "bottom"):
+                desired["bar"]["position"] = position
+            provider = entry.pop("shibumiRetainedImageStyle", None)
+            picker = entry.get("shibumi", {}).get("picker")
+            if (provider in ("tanzaku", "hearthstone") and isinstance(picker, dict)
+                    and picker.get("imageStyle") == "omarchy"):
+                picker["imageStyle"] = provider
+        return desired
 
     desired = desired_for(current)
     specs = suite.selected(profile.install)
@@ -1049,11 +1139,14 @@ def command_activate(
         if (
             configured_bar_id(current) != profile.active_bar
             and isinstance(current_bar, dict)
+            and has_stock_widgets(current_bar, set(suite.plugins))
+            and (not external_activation(state, current) or "previousBar" not in state)
         ):
             # Only an actual external-owner -> managed-owner transition updates
             # the complete restoration snapshot. Re-activating an already
             # managed bar must never snapshot Shibumi as its own predecessor.
-            activated_state["previousBar"] = copy.deepcopy(current_bar)
+            # A preserved external layout may still contain Shibumi's widgets.
+            activated_state["previousBar"] = strip_suite_bar(current_bar, set(suite.plugins))
         activation = activated_state.setdefault("activation", {})
         user_layout = bool(getattr(args, "user_layout", False))
         activation["mode"] = "external" if user_layout else "managed"
@@ -1083,6 +1176,12 @@ def command_deactivate(
         if state.get("settingsStorageVersion") == 1:
             config = migrate_state_settings(config, import_legacy=False)
         if args.keep_layout:
+            config = copy.deepcopy(config)
+            entry = state_entry(config)
+            if entry is not None:
+                picker = entry.get("shibumi", {}).get("picker")
+                if isinstance(picker, dict) and picker.get("imageStyle") in ("tanzaku", "hearthstone"):
+                    entry["shibumiRetainedImageStyle"] = picker["imageStyle"]
             desired_config = remove_plugin_ids(select_omarchy_image_picker(
                 preserve_external_bar(
                     config,
@@ -1100,16 +1199,31 @@ def command_deactivate(
             activation["configuredBar"] = configured_bar_id(desired_config)
             next_state["updatedEpoch"] = int(time.time())
             return desired_config, next_state
+        config = copy.deepcopy(config)
+        entry = state_entry(config)
+        if (entry is not None and configured_bar_id(config) == active_bar
+                and not external_activation(state, config)):
+            # Only the supported managed handoff owns a private position snapshot.
+            position = config["bar"].get("position")
+            if position in ("top", "bottom"):
+                entry["shibumiRetainedPosition"] = position
+        if entry is not None:
+            picker = entry.get("shibumi", {}).get("picker")
+            if isinstance(picker, dict) and picker.get("imageStyle") in ("tanzaku", "hearthstone"):
+                # Repeated deactivation must not remember our native fallback.
+                entry["shibumiRetainedImageStyle"] = picker["imageStyle"]
         return (
             remove_plugin_ids(select_omarchy_image_picker(
                 remove_suite(
                     config,
                     suite.plugins,
+                    paths.plugin_dir,
                     active_bar,
                     default_center_anchor(defaults),
                     True,
                     CONTINUITY_PLUGIN_IDS,
-                    previous_bar_for_state(state, defaults),
+                    previous_bar_for_state(state, defaults, suite),
+                    retain_layout=not external_activation(state, config),
                 )
             ), suite.retired_plugins),
             state,
@@ -1184,6 +1298,15 @@ def command_uninstall(
     runtime: OmarchyRuntime,
 ) -> int:
     state = load_install_state(paths, suite)
+    try:
+        menu = read_extension(paths.menu_extension_file)
+        if menu is not None:
+            preflight_picker_removal(menu)
+    except MenuExtensionError as error:
+        raise CliError(
+            f"cannot remove Omarchy menu routing {paths.menu_extension_file}: {error}; "
+            "fix the JSONC syntax or routing markers, or move this file aside, then retry uninstall"
+        ) from error
     plugin_ids = list(dict.fromkeys(state["plugins"]))
     current_plugin_ids = [
         plugin_id for plugin_id in plugin_ids if plugin_id in suite.plugins
@@ -1204,11 +1327,13 @@ def command_uninstall(
             remove_suite(
                 config,
                 suite.plugins,
+                paths.plugin_dir,
                 str(state.get("activeBar") or "hancore.shibumi.bar"),
                 default_center_anchor(defaults),
                 args.keep_settings,
+                retain_layout=args.keep_settings,
                 restore_bar=(
-                    previous_bar_for_state(state, defaults)
+                    previous_bar_for_state(state, defaults, suite, continuity=False)
                     if str(state.get("activation", {}).get("mode") or "managed")
                     == "managed"
                     else None
@@ -1242,10 +1367,49 @@ def command_uninstall(
         runtime.verify_uninstall(set(plugin_ids))
         transaction.finish(None, archive_previous=False)
 
-    if paths.state_dir.is_dir():
-        shutil.rmtree(paths.state_dir)
-    if paths.cache_dir.is_dir():
-        shutil.rmtree(paths.cache_dir)
+    leftovers: dict[Path, str] = {}
+    for directory in (paths.state_dir, paths.cache_dir):
+        try:
+            if directory.is_dir():
+                shutil.rmtree(directory)
+        except OSError as error:
+            leftovers[directory] = f"cleanup failed: {error}"
+        try:
+            directory.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            leftovers[directory] = f"cannot verify removal: {error}"
+        else:
+            leftovers.setdefault(directory, "directory remains")
+    menu = paths.menu_extension_file
+    try:
+        menu.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        leftovers[menu] = f"cannot verify routing removal: {error}"
+    else:
+        try:
+            payload = _read_bounded_regular_path(menu, "Omarchy menu extension")
+            if START_MARKER.encode() in payload or END_MARKER.encode() in payload:
+                leftovers[menu] = "Shibumi picker routing markers remain"
+        except (OSError, TransactionError) as error:
+            leftovers[menu] = f"cannot verify routing removal: {error}"
+    for path, reason in leftovers.items():
+        remedy = (
+            "remove only the Shibumi picker routing start/end block from this file"
+            if path == menu else
+            "remove this Shibumi-owned directory after confirming the stock bar is active"
+        )
+        print(
+            f"shibumi-suite: uninstall incomplete: {path}: {reason}; "
+            "re-run uninstall --yes from the same checkout if install.json remains, "
+            f"or manually {remedy}.",
+            file=sys.stderr,
+        )
+    if leftovers:
+        return 1
     print("Uninstalled Shibumi and restored the stock Omarchy bar.")
     return 0
 
@@ -1271,15 +1435,63 @@ def command_status_with_admission(suite: Suite, paths: RuntimePaths) -> int:
             file=sys.stderr,
         )
         return 1
-    except AdmissionError:
+    except AdmissionError as error:
         print(
             "shibumi-suite: status admission refused; malformed, unsafe, "
             "ambiguous, or unsupported state was not inspected further; "
             "no recovery or mutation was attempted",
             file=sys.stderr,
         )
+        reason = str(error)
+        # Only format the existing preflight result: never inspect refused
+        # state again. Keep authority paths redacted, as in other status errors.
+        rendered = reason
+        for root, label in ((paths.state_dir, "<state>"),
+                            (paths.plugin_dir, "<plugins>"),
+                            (suite.root, "<suite>")):
+            rendered = rendered.replace(str(root), label)
+        print(f"shibumi-suite: refusal reason: {rendered}", file=sys.stderr)
+        plugin_ids = sorted(set(re.findall(
+            re.escape(str(paths.plugin_dir) + "/")
+            + r"([A-Za-z0-9][A-Za-z0-9._-]{0,199})(?=/|$)", reason,
+        )))
+        if plugin_ids:
+            # The existing combined check does not distinguish these causes.
+            # Do not invent a diagnosis or rescan to disambiguate it.
+            combined = reason.startswith("live plugin marker or payload")
+            labels = ("Locally modified", "Ownership mismatch") if combined else (
+                "Locally modified" if "payload" in reason else "Ownership mismatch",
+            )
+            qualifier = " (possible; preflight reports marker or payload mismatch)" if combined else ""
+            for label in labels:
+                print(f"{label}: {', '.join(plugin_ids)}{qualifier}", file=sys.stderr)
         return 1
     return command_status(suite, paths)
+
+
+def catalog_status_warning(suite: Suite, paths: RuntimePaths) -> str:
+    """One PID-bound, read-only helper read; no separate listPlugins scan."""
+    runtime = OmarchyRuntime(paths.omarchy_root)
+    try:
+        instances = runtime.shell_instances()
+        if len(instances) != 1 or type(instances[0].get("pid")) is not int or instances[0]["pid"] <= 1:
+            return "process-identity"
+        helper = suite.root / "hancore.shibumi.control-center/manager/shibumi-native-catalog"
+        result = runtime.run([sys.executable, "-I", "-S", str(helper),
+            "--shell", str(paths.omarchy_root / "shell"), "--pid", str(instances[0]["pid"])],
+            timeout=8, check=False)
+        if result.returncode:
+            code = result.stderr.strip()
+            return code if re.fullmatch(r"[a-z][a-z-]{0,63}", code) else "read-failed"
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            return "catalog-shape"
+        codes = {row["catalogIssue"] for row in rows if "catalogIssue" in row}
+        if any(not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z-]{0,63}", code) for code in codes):
+            return "catalog-shape"
+        return ", ".join(sorted(codes))
+    except (RuntimeFailure, ValueError, TypeError):
+        return "ipc-failed"
 
 
 def command_status(suite: Suite, paths: RuntimePaths) -> int:
@@ -1378,6 +1590,9 @@ def command_status(suite: Suite, paths: RuntimePaths) -> int:
         print(f"Config: invalid ({error})")
         print("Repair with: shibumi-suite repair")
         return 1
+    catalog_issue = catalog_status_warning(suite, paths)
+    if catalog_issue:
+        print(f"Warning: plugin-catalog ({catalog_issue})")
     unhealthy = bool(
         missing or unmanaged or modified or pending_retirement or drift
     )

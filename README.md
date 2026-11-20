@@ -16,12 +16,13 @@ process.</sub></p>
 [Documentation](docs/README.md) ·
 [Release status](docs/release-readiness.md)
 
-The published `0.1.1-beta.14.1` prerelease was validated on a single-output
-Omarchy 4.0.3 host; see the release notes for scope and known limits.
-The current pinned host contracts use Omarchy
-and Omarchy Settings `4.0.3-1` (source tag `v4.0.3`, revision `05349870`) with
-Quickshell `0.3.1-1`; the 4.0.2 manifests remain an optional compatibility
-baseline. Multi-output acceptance was not run. See the
+`0.2.5` is the current stable release target. See the
+[release notes](.github/release-notes/v0.2.5.md) for changes. Before using an older version, read the
+[backup and downgrade warning](docs/install.md#backup-before-downgrade).
+The current pinned host contracts target Omarchy and Omarchy Settings `4.5.0-3`
+(source tag `v4.5.0`, revision `ac2690cd7`) with Quickshell `0.3.2.r7.g2b4501a-1`; the
+4.0.3 and 4.0.2 manifests remain optional compatibility baselines.
+Multi-output acceptance was not run. See the
 [Shibumi host compatibility record](docs/architecture/quattro-compatibility.md)
 for the latest validated host versions.
 
@@ -61,45 +62,53 @@ for the latest validated host versions.
 ## Install
 
 > [!IMPORTANT]
-> `0.1.1-beta.14.1` is published as a GitHub prerelease, but AUR publication is
-> deferred and the package is not available from AUR yet. Until the AUR package
-> is published, use the source path below. Shibumi supports Omarchy Quattro
-> only.
+> Shibumi supports Omarchy Quattro only. Install the package or the release
+> tag, never `main`.
 
-After AUR publication, the supported one-command installation is:
+### From the Omarchy package repository
 
-```bash
-omarchy pkg aur add shibumi-shell && shibumi-shell install --yes
+Available since 0.2.0 (`edge` from 2026-11-04; `rc` and `stable` after
+Omarchy's promotion).
+
+```sh
+omarchy pkg add shibumi-shell
+shibumi-shell install --yes
 ```
 
-Pacman resolves the required runtime packages and skips dependencies already
-provided by the system. The explicit Shibumi command then stages and verifies
-the 24 user plugins without a root package hook touching the user's config.
+The package brings the dependencies; the second line stages the plugins into your
+shell as your user. Update with `omarchy update` and `shibumi-shell update --yes`.
 
-Until the AUR package is released, use this transitional source installation:
+### From the release tag
 
 ```bash
 sudo pacman -S --needed python jq curl networkmanager power-profiles-daemon upower xdg-utils libnotify wl-clipboard ttf-material-symbols-variable ttf-jetbrains-mono-nerd-basic noto-fonts-cjk adwaita-fonts
 git clone https://github.com/HANCORE-linux/Shibumi-Shell.git
 cd Shibumi-Shell
-git checkout v0.1.1-beta.14.1
+git checkout v0.2.5
 ./scripts/shibumi-suite install --yes
 ```
 
-Update the transitional source installation from an earlier tag (supported predecessors: tags v0.1.1-beta.11 through v0.1.1-beta.13):
+Run the Pacman line yourself; it installs the runtime commands and fonts and
+is the only step that needs `sudo`. The Shibumi suite never calls Pacman: it
+runs as the desktop user and writes only user-scoped plugin state.
+
+Update an exactly admitted source installation to 0.2.5. The most recent
+published predecessor is 0.2.4: tag `12763c68` and the main integration merge
+`700180ef` (#106) carry the same released payload;
+its package identity is admitted too. Older supported identities remain
+admitted; exact revisions and payloads, not a version range, govern admission.
+See the [update guide](docs/install.md#update).
 
 ```sh
 cd Shibumi-Shell
 git fetch --tags
-git checkout v0.1.1-beta.14.1
+git checkout v0.2.5
+./scripts/shibumi-suite update --dry-run
 ./scripts/shibumi-suite update --yes
+./scripts/shibumi-suite status
 ```
 
 Do not install or update from `main`. If you previously installed from `main`, run `./scripts/shibumi-suite uninstall --keep-settings --yes` from that exact checkout before switching to a tag.
-
-This transitional source command asks for root privileges only while Pacman
-installs missing runtime commands and fonts. The Shibumi lifecycle itself runs
-as the desktop user and writes only user-scoped plugin state.
 
 [Installation, updates, recovery, and removal](docs/install.md)
 
@@ -111,7 +120,7 @@ Remove all managed Shibumi plugins and restore the stock Omarchy bar:
 shibumi-shell uninstall --yes && omarchy pkg drop shibumi-shell
 ```
 
-For the transitional source installation, run this from its checkout instead:
+For a source installation, run this from its checkout instead:
 
 ```bash
 ./scripts/shibumi-suite uninstall --yes

@@ -4,6 +4,7 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/tests/lib/baselines.sh"
+source "$repo_root/tests/lib/host-diagnostics.sh"
 shibumi_load_omarchy_baseline
 omarchy_path=$OMARCHY_PATH
 quickshell_bin=${QUICKSHELL_BIN:-/usr/bin/quickshell}
@@ -27,7 +28,9 @@ printf '{"suiteId":"hancore.shibumi","suitePayloadDigest":"%064d"}\n' 0 \
   > "$tmpdir/hancore.shibumi.state/.shibumi-managed.json"
 cp -a -- "$repo_root/hancore.shibumi.temperature" "$tmpdir/temperature"
 cp -a -- "$repo_root/hancore.shibumi.storage" "$tmpdir/storage"
-for plugin in cpu memory gpu temperature storage; do
+cp -a -- "$repo_root/hancore.shibumi.battery" "$tmpdir/battery"
+install -Dm0644 "$repo_root/tests/fixtures/PowerTestService.qml" "$tmpdir/fixtures/PowerTestService.qml"
+for plugin in cpu memory gpu temperature storage battery; do
   install -m 0644 "$repo_root/tests/fixtures/ShibumiPanelTest.qml" \
     "$tmpdir/$plugin/ShibumiPanel.qml"
 done
@@ -125,7 +128,7 @@ printf '%s\n' "$slice_output"
 [[ $slice_rc -eq 0 ]] || fail "scoped telemetry smoke exited $slice_rc"
 grep -F 'telemetry runtime smoke passed' <<<"$slice_output" >/dev/null \
   || fail "scoped telemetry success marker missing"
-if grep -Eq 'TypeError|ReferenceError|Binding loop|Unable to assign|Internal error|Cannot assign' <<<"$slice_output"; then
+if grep -Eq "$HOST_DIAGNOSTICS_BINDING" <<<"$slice_output"; then
   fail "scoped telemetry QML runtime error detected"
 fi
 
@@ -150,9 +153,9 @@ for plugin in memory cpu; do
     "$repo_root/hancore.shibumi.$plugin/${plugin^}Panel.qml" \
     || fail "$plugin panel bypasses its owner action"
 done
-rg -q 'text: "CPU · GPU"' \
+rg -Fq 'text: gpuUsage.visible ? "CPU · GPU" : "CPU"' \
   "$repo_root/hancore.shibumi.cpu/CpuPanel.qml" \
-  || fail "CPU panel lost the V1 CPU/GPU heading"
+  || fail "CPU panel heading does not follow GPU row visibility"
 rg -q 'visible: panel\.gpuTelemetry && panel\.gpuTelemetry\.available' \
   "$repo_root/hancore.shibumi.cpu/CpuPanel.qml" \
   || fail "CPU panel does not gate GPU data on a real telemetry backend"

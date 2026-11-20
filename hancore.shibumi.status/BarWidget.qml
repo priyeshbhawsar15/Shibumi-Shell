@@ -10,13 +10,14 @@ Item {
   property var bar: null
   property string moduleName: "hancore.shibumi.status"
   property var settings: ({})
-  readonly property url updateSource: registeredSource(
+  HostWidgetEmbed { id: embed; bar: root.bar }
+  readonly property url updateSource: embed.resolveSource(
     "hancore.shibumi.update-center")
-  readonly property url traySource: registeredSource("omarchy.tray")
-  property Component updateComponent: String(updateSource) ? null
-    : registeredComponent("hancore.shibumi.update-center")
-  property Component trayComponent: String(traySource) ? null
-    : registeredComponent("omarchy.tray")
+  readonly property url traySource: embed.resolveSource("omarchy.tray")
+  property var updateComponent: String(updateSource) ? null
+    : embed.resolveComponent("hancore.shibumi.status", "hancore.shibumi.update-center")
+  property var trayComponent: String(traySource) ? null
+    : embed.resolveComponent("hancore.shibumi.status", "omarchy.tray")
   property url trayDrawerSource: Qt.resolvedUrl("TrayDrawerPanel.qml")
   property url trayAppMenuSource: Qt.resolvedUrl("TrayAppMenuPanel.qml")
   property url notificationPanelSource: Qt.resolvedUrl("NotificationPanel.qml")
@@ -26,6 +27,7 @@ Item {
   property var trayAppMenuAnchor: null
   property real trayAppMenuAnchorX: 0
   property bool notificationPanelOpen: false
+  property var lifecycleBar: null
 
   Presentation.HostTokens { id: hostTokens; bar: root.bar }
   readonly property var tokens: bar && "visualTokens" in bar
@@ -76,11 +78,7 @@ Item {
   readonly property int pendingCount: notificationView.pendingCount
   readonly property int recentCount: notificationView.recentCount
   readonly property int notificationCount: notificationView.notificationCount
-  readonly property string textLabel: notificationService
-    && notificationService.doNotDisturb === true ? "DND"
-    : notificationCount > 0
-      ? notificationCount + (notificationCount === 1
-        ? " NOTIFICATION" : " NOTIFICATIONS") : "CLEAR"
+  readonly property string textLabel: notificationView.tooltipText
   readonly property bool ready: updateWidget !== null || trayWidget !== null
     || notificationService !== null
   readonly property bool opened: trayDrawerOpen || trayAppMenuOpen
@@ -92,6 +90,64 @@ Item {
     || iconMode && notificationPresented
     || textMode && notificationService !== null
   readonly property real childGap: Commons.Style.space(4)
+  Presentation.BarInk { id: statusPlacement; target: root }
+  // Quick Access: 22px slots + 4px spacing - 12px glyphs = 14px ink gap.
+  // Return the interior savings to the owner rather than to its outer gaps.
+  readonly property real iconGapPixels: Math.round(Commons.Style.space(14) * statusPlacement.dpr)
+  readonly property rect updateInk: updateWidget && updateWidget.iconInk !== undefined
+    ? updateWidget.mapToItem(updateSlot, updateWidget.iconInk) : Qt.rect(0, 0, 0, 0)
+  function inkEdge(slot, ink, end) {
+    const edge = (statusPlacement.origin.x + horizontalInset + slot.x
+      + ink.x + (end ? ink.width : 0)) * statusPlacement.dpr
+    return end ? Math.ceil(edge - 1e-7) : Math.floor(edge + 1e-7)
+  }
+  readonly property real directContraction: fullMode && updatePresented
+    && notificationPresented && !trayPresented && updateInk.width > 0
+    ? Math.max(0, inkEdge(notificationView, notificationView.iconInk, false)
+      - inkEdge(updateSlot, updateInk, true) - iconGapPixels) : 0
+  readonly property real updateShift: !fullMode || !updatePresented || updateInk.width <= 0 ? 0
+    : (trayPresented ? trayView.pinnedCount > 0
+      ? Math.round(Commons.Style.space(3) * statusPlacement.dpr)
+      : Math.min(Math.floor(childGap * statusPlacement.dpr),
+        Math.max(0, inkEdge(trayView, trayView.drawerInk, false)
+          - inkEdge(updateSlot, updateInk, true) - iconGapPixels))
+      : Math.ceil(directContraction / 2)) / statusPlacement.dpr
+  readonly property real bellShift: !fullMode || !notificationPresented ? 0
+    : -(trayPresented ? trayView.drawerCount > 0
+      ? Math.min(Math.floor(childGap * statusPlacement.dpr),
+        Math.max(0, inkEdge(notificationView, notificationView.iconInk, false)
+          - inkEdge(trayView, trayView.drawerInk, true) - iconGapPixels))
+      : Math.round(Commons.Style.space(3) * statusPlacement.dpr)
+      : Math.floor(directContraction / 2)) / statusPlacement.dpr
+  property real spacingSavings: 0
+  property bool savingsPending: false
+  property bool spacingActive: false
+  property real spacingSavingsLeft: -1
+  property double spacingSavingsChangedAt: 0
+  // Settle after layout: binding width directly to snapped ink feeds the
+  // parent's new position back into its own reservation.
+  function syncSpacingSavings() {
+    if (!root || !spacingActive) return
+    const saved = Math.max(0, updateShift - bellShift)
+    savingsPending = false
+    if (Math.abs(spacingSavings - saved) <= 1e-7) return
+    // Deferring alone does not settle it: a centered compact shell moves with
+    // its own width, and at fractional scales (1.25x) that move flips the
+    // snapped ink edges straight back, resizing the bar every frame. Ignore an
+    // immediate return to the value just left.
+    const now = Date.now()
+    if (Math.abs(saved - spacingSavingsLeft) <= 1e-7
+        && now - spacingSavingsChangedAt < 500) return
+    spacingSavingsLeft = spacingSavings
+    spacingSavingsChangedAt = now
+    spacingSavings = saved
+  }
+  function scheduleSpacingSavings() {
+    savingsPending = true
+    Qt.callLater(syncSpacingSavings)
+  }
+  onUpdateShiftChanged: scheduleSpacingSavings()
+  onBellShiftChanged: scheduleSpacingSavings()
   readonly property int presentedCount: fullMode
     ? (updatePresented ? 1 : 0) + (trayPresented ? 1 : 0)
       + (notificationPresented ? 1 : 0)
@@ -99,7 +155,7 @@ Item {
   readonly property real contentWidth:
     fullMode
       ? updateSlotWidth + traySlotWidth + notificationSlotWidth
-        + Math.max(0, presentedCount - 1) * childGap
+        + Math.max(0, presentedCount - 1) * childGap - spacingSavings
       : textMode ? textStatus.implicitWidth : notificationView.implicitWidth
   readonly property real updateSlotWidth: updatePresented
     ? updateSlot.implicitWidth : 0
@@ -110,9 +166,6 @@ Item {
   readonly property real trayPinnedIconOffset:
     trayView.pinnedIconHorizontalOffset
   readonly property color trayDrawerIconColor: trayView.drawerIconColor
-  readonly property color trayDrawerBadgeColor: trayView.drawerBadgeColor
-  readonly property color trayDrawerBadgeTextColor:
-    trayView.drawerBadgeTextColor
   readonly property color notificationBadgeColor:
     notificationView.badgeFillColor
   readonly property color notificationBadgeTextColor:
@@ -122,39 +175,11 @@ Item {
   readonly property real updateSlotLayer: updateSlot.z
   readonly property real traySlotLayer: trayView.z
   readonly property real notificationSlotLayer: notificationView.z
-  readonly property real updateBadgeLayer: updateWidget
-    && "badgeLayer" in updateWidget ? Number(updateWidget.badgeLayer) : 0
-  readonly property real trayBadgeLayer: trayView.badgeLayer
   readonly property real notificationBadgeLayer: notificationView.badgeLayer
 
   visible: ready && hasVisibleChild
   implicitWidth: visible ? contentWidth + 2 * horizontalInset : 0
   implicitHeight: visible ? (bar ? bar.barSize : Commons.Style.space(35)) : 0
-
-  function registeredComponent(id) {
-    if (bar
-        && typeof bar.registeredEmbeddedWidgetComponent === "function")
-      return bar.registeredEmbeddedWidgetComponent(
-        "hancore.shibumi.status", id)
-    if (bar && typeof bar.registeredWidgetComponent === "function")
-      return bar.registeredWidgetComponent(id)
-    const registry = bar ? bar.barWidgetRegistry : null
-    if (registry) void(registry.revision)
-    const widgets = registry && registry.widgets ? registry.widgets : ({})
-    const entry = widgets[id]
-    return entry ? entry.component : null
-  }
-
-  function registeredSource(id) {
-    if (bar && typeof bar.registeredWidgetSource === "function")
-      return bar.registeredWidgetSource(id)
-    const registry = bar && bar.shell
-      && "pluginRegistry" in bar.shell ? bar.shell.pluginRegistry : null
-    const pluginManifest = registry && registry.installedPlugins
-      ? registry.installedPlugins[String(id || "")] : null
-    return registry && typeof registry.entryPointUrl === "function"
-      ? registry.entryPointUrl(pluginManifest, "barWidget") : ""
-  }
 
   function childSettings(id) {
     return bar && typeof bar.widgetSettings === "function"
@@ -193,20 +218,12 @@ Item {
     if ("settings" in item)
       item.settings = childSettings("hancore.shibumi.update-center")
     if ("contentColor" in item) item.contentColor = root.widgetInk
-    if ("customToneActive" in item)
-      item.customToneActive = root.v1CustomToneActive
-    if ("badgeContrastColor" in item)
-      item.badgeContrastColor = root.badgeContrastColor
   }
 
   function syncUpdateInk() {
     if (!updateWidget) return
     if ("contentColor" in updateWidget)
       updateWidget.contentColor = root.widgetInk
-    if ("customToneActive" in updateWidget)
-      updateWidget.customToneActive = root.v1CustomToneActive
-    if ("badgeContrastColor" in updateWidget)
-      updateWidget.badgeContrastColor = root.badgeContrastColor
   }
 
   function injectChildren() {
@@ -214,36 +231,15 @@ Item {
     injectChild(trayWidget, "omarchy.tray")
   }
 
-  function syncLoader(loader, component, source, id) {
-    loader.sourceComponent = null
-    loader.source = ""
-    if (component !== null) {
-      loader.sourceComponent = component
-    } else if (String(source)) {
-      loader.setSource(source, {
-        bar: hostProxy,
-        moduleName: id,
-        settings: childSettings(id)
-      })
-    }
-  }
-
-  function syncTrayLoader() {
-    syncLoader(trayLoader, trayComponent, traySource, "omarchy.tray")
-  }
-
-  function syncUpdateLoader() {
-    updateLoader.sourceComponent = null
-    updateLoader.source = ""
-    if (updateComponent !== null) {
-      updateLoader.sourceComponent = updateComponent
-    } else if (String(updateSource)) {
-      updateLoader.setSource(updateSource, {
-        bar: root.bar,
-        moduleName: "hancore.shibumi.update-center",
-        settings: childSettings("hancore.shibumi.update-center")
-      })
-    }
+  function syncChildren() {
+    embed.syncLoader(updateLoader, updateComponent, updateSource, {
+      bar: root.bar, moduleName: "hancore.shibumi.update-center",
+      settings: childSettings("hancore.shibumi.update-center")
+    }, root.bar)
+    const trayId = "omarchy.tray"
+    embed.syncLoader(trayLoader, trayComponent, traySource, {
+      bar: hostProxy, moduleName: trayId, settings: childSettings(trayId)
+    }, root.bar)
   }
 
   function syncTrayDrawerLoader() {
@@ -429,10 +425,18 @@ Item {
   }
 
   function scheduleChildSync() {
-    childSyncTimer.restart()
+    if (root && !embed.shuttingDown) childSyncTimer.restart()
   }
 
   onBarChanged: {
+    if (bar) lifecycleBar = bar
+    else if (lifecycleBar && "tearingDown" in lifecycleBar
+        && lifecycleBar.tearingDown === true) {
+      if (updateWidget && "registeredBar" in updateWidget)
+        updateWidget.registeredBar = null
+      if (updateWidget && "bar" in updateWidget) updateWidget.bar = null
+      if (trayWidget && "bar" in trayWidget) trayWidget.bar = null
+    }
     scheduleChildSync()
     if (trayDrawerOpen) syncTrayDrawerLoader()
     if (notificationPanelOpen) syncNotificationPanelLoader()
@@ -465,12 +469,24 @@ Item {
   onBadgeContrastColorChanged: syncUpdateInk()
 
   Component.onCompleted: {
+    spacingActive = true
+    scheduleSpacingSavings()
+    lifecycleBar = bar
     scheduleChildSync()
   }
   Component.onDestruction: {
+    spacingActive = false
+    savingsPending = false
     close()
+    const dyingBar = bar || lifecycleBar
+    if (dyingBar && "tearingDown" in dyingBar
+        && dyingBar.tearingDown === true && updateWidget
+        && "registeredBar" in updateWidget)
+      updateWidget.registeredBar = null
     if (updateWidget && "bar" in updateWidget) updateWidget.bar = null
     if (trayWidget && "bar" in trayWidget) trayWidget.bar = null
+    childSyncTimer.stop()
+    embed.shutdown()
   }
 
   QtObject {
@@ -552,8 +568,7 @@ Item {
     id: childSyncTimer
     interval: 0
     onTriggered: {
-      root.syncUpdateLoader()
-      root.syncTrayLoader()
+      root.syncChildren()
       root.injectChildren()
     }
   }
@@ -572,15 +587,20 @@ Item {
 
   Row {
     id: statusRow
-    anchors.centerIn: parent
+    anchors.verticalCenter: parent.verticalCenter
+    x: root.horizontalInset
+    transform: Translate { x: -root.updateShift }
     spacing: root.childGap
     z: 2
 
     Item {
       id: updateSlot
+      transform: Translate { x: root.updateShift }
       anchors.verticalCenter: parent.verticalCenter
       visible: root.fullMode && updateLoader.item !== null
-      implicitWidth: visible ? root.statusActionSlot : 0
+      implicitWidth: visible ? root.statusActionSlot
+        + (root.updateWidget && "leadingWidth" in root.updateWidget
+          ? Number(root.updateWidget.leadingWidth) : 0) : 0
       implicitHeight: updateLoader.implicitHeight
       width: implicitWidth
       height: implicitHeight
@@ -598,16 +618,15 @@ Item {
       visible: root.fullMode && presented
       bar: root.bar
       trayBackend: root.trayWidget
-      customToneActive: root.v1CustomToneActive
       contentColor: root.v1CustomToneActive
         ? root.widgetInk : root.bar ? root.bar.foreground : root.widgetInk
-      badgeContrastColor: root.badgeContrastColor
       z: 2
       onDrawerRequested: root.toggleTrayDrawer()
     }
 
     NotificationStatusView {
       id: notificationView
+      transform: Translate { x: root.bellShift }
       visible: (root.fullMode || root.iconMode) && presented
       bar: root.bar
       contentColor: root.widgetInk
@@ -641,13 +660,18 @@ Item {
         }
       }
 
+      Connections {
+        target: root
+        function onTextLabelChanged() { if (textStatusMouse.containsMouse && root.bar) root.bar.showTooltip(textStatus, root.textLabel) }
+      }
       onVisibleChanged: syncRegistration()
       Component.onCompleted: syncRegistration()
       Component.onDestruction: if (root.bar && registered)
         root.bar.unregisterClickTarget(textStatus)
 
-      Text {
+      Presentation.IconText {
         id: statusText
+        barText: true
         anchors.centerIn: parent
         text: root.textLabel
         color: root.widgetInk
@@ -659,14 +683,12 @@ Item {
       }
 
       MouseArea {
+        id: textStatusMouse
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
-        onEntered: if (root.bar) root.bar.showTooltip(textStatus,
-          root.notificationCount > 0
-            ? root.notificationCount + (root.notificationCount === 1
-              ? " notification" : " notifications") : root.textLabel)
+        onEntered: if (root.bar) root.bar.showTooltip(textStatus, root.textLabel)
         onExited: if (root.bar) root.bar.hideTooltip(textStatus)
         onClicked: function(mouse) {
           if (root.bar) root.bar.hideTooltip(textStatus)

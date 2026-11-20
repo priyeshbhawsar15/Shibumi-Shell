@@ -14,7 +14,7 @@ Item {
   SuiteRuntime.Provider {
     id: runtimeProvider
     pluginId: "hancore.shibumi.audio"
-    implementationVersion: "0.1.1-beta.14.1"
+    implementationVersion: "0.2.5"
     owner: root
     host: root.shell
     manifest: root.manifest
@@ -246,7 +246,7 @@ Item {
 
   IpcHandler {
     enabled: root.backendAdmitted
-    target: "omarchy.audio"
+    target: SuiteRuntime.HostContract.ipcTargets.audio
 
     function open(): void { root.openPanel() }
     function close(): void { root.closePanel() }

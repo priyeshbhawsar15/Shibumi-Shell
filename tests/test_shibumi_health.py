@@ -6,6 +6,7 @@ import json
 import os
 import runpy
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -162,11 +163,13 @@ class HealthDiagnosticsTests(unittest.TestCase):
             },
         ]
         self.write_json(self.registry_file, self.registry)
+        self.instance_id = "health-fixture"
         self.process_file = self.root / "processes.json"
         self.write_json(
             self.process_file,
             [
                 {
+                    "id": self.instance_id,
                     "pid": 4242,
                     "command": "quickshell -n -p /usr/share/omarchy/shell",
                     "config_path": str(self.omarchy / "shell/shell.qml"),
@@ -178,7 +181,12 @@ class HealthDiagnosticsTests(unittest.TestCase):
             self.output_file,
             [{"name": "eDP-1", "scale": 1.0, "width": 1920, "height": 1080}],
         )
-        self.log_file = self.root / "quickshell.log"
+        self.runtime_dir = self.root / "runtime"
+        self.log_dir = (
+            self.runtime_dir / "quickshell/by-id" / self.instance_id
+        )
+        self.log_dir.mkdir(parents=True)
+        self.log_file = self.log_dir / "log.log"
         self.log_file.write_text("INFO Configuration Loaded\n", encoding="utf-8")
 
         self.environment = os.environ.copy()
@@ -196,7 +204,7 @@ class HealthDiagnosticsTests(unittest.TestCase):
                 "SHIBUMI_HEALTH_PROCESS_FILE": str(self.process_file),
                 "SHIBUMI_HEALTH_PROCESS_LIVE": "true",
                 "SHIBUMI_HEALTH_OUTPUT_FILE": str(self.output_file),
-                "SHIBUMI_HEALTH_LOG_FILE": str(self.log_file),
+                "XDG_RUNTIME_DIR": str(self.runtime_dir),
             }
         )
 
@@ -238,6 +246,34 @@ class HealthDiagnosticsTests(unittest.TestCase):
         self.git("add", "README.md", cwd=writer)
         self.git("commit", "-m", "remote fixture change", cwd=writer)
         self.git("push", "origin", "main", cwd=writer)
+
+    def push_remote_tag(self, tag: str) -> None:
+        self.git(
+            "push",
+            "origin",
+            f"HEAD:refs/tags/{tag}",
+            cwd=self.source,
+        )
+
+    def use_timed_out_fetch(self) -> None:
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        fake_git = fake_bin / "git"
+        fake_git.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys, time\n"
+            "if 'fetch' in sys.argv:\n"
+            "    time.sleep(10)\n"
+            f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        self.environment["PATH"] = (
+            str(fake_bin) + os.pathsep + self.environment["PATH"]
+        )
+        self.environment["SHIBUMI_HEALTH_FETCH_TIMEOUT"] = "0.05"
 
     def write_json(self, path: Path, value: object) -> None:
         path.write_text(json.dumps(value) + "\n", encoding="utf-8")
@@ -490,6 +526,144 @@ class HealthDiagnosticsTests(unittest.TestCase):
         self.assertEqual(check["status"], "warning")
         self.assertEqual(check["value"], "Current · dirty")
 
+    def test_detached_exact_release_tag_is_a_clean_release_checkout(self) -> None:
+        # Lightweight release tags are accepted when they strictly match v<SemVer>.
+        tag = "v0.1.1-beta.15"
+        self.git("tag", tag, cwd=self.source)
+        self.git("checkout", "--detach", tag, cwd=self.source)
+        commit = self.git_output("rev-parse", "HEAD")
+
+        checks = self.by_id(self.run_health())
+        source = checks["source-status"]
+
+        self.assertEqual(source["label"], "Release checkout")
+        self.assertEqual(source["status"], "ok")
+        self.assertEqual(source["value"], f"{tag} · clean")
+        self.assertEqual(source["detail"], f"{tag} · {commit[:10]}")
+        self.assertEqual(source["action"], "")
+        self.assertEqual(checks["source-update"]["value"], "Not checked")
+
+    def test_detached_annotated_release_tag_reports_dirty_checkout(self) -> None:
+        tag = "v0.1.1-beta.15"
+        self.git("tag", "--annotate", tag, "-m", "fixture release", cwd=self.source)
+        self.git("checkout", "--detach", tag, cwd=self.source)
+        (self.source / "README.md").write_text("dirty release\n", encoding="utf-8")
+
+        source = self.by_id(self.run_health())["source-status"]
+
+        self.assertEqual(source["label"], "Release checkout")
+        self.assertEqual(source["status"], "warning")
+        self.assertEqual(source["value"], f"{tag} · dirty")
+        self.assertEqual(source["action"], "Review local changes before updating.")
+
+    def test_attached_branch_at_release_tag_remains_a_development_checkout(self) -> None:
+        self.git("tag", "v0.1.1-beta.15", cwd=self.source)
+
+        source = self.by_id(self.run_health())["source-status"]
+
+        self.assertEqual(source["label"], "Development checkout")
+        self.assertEqual(source["status"], "ok")
+        self.assertEqual(source["value"], "Current · clean")
+
+    def test_detached_untagged_checkout_uses_existing_development_warning(self) -> None:
+        self.git("checkout", "--detach", "HEAD", cwd=self.source)
+
+        source = self.by_id(self.run_health())["source-status"]
+
+        self.assertEqual(source["label"], "Development checkout")
+        self.assertEqual(source["status"], "warning")
+        self.assertEqual(source["value"], "Check failed")
+        self.assertIn("branch", source["action"])
+
+    def test_malformed_and_nonrelease_tags_do_not_claim_a_release(self) -> None:
+        for tag in (
+            "release-1.2.3",
+            "v1.2",
+            "v01.2.3",
+            "v1.2.3-alpha.01",
+        ):
+            self.git("tag", tag, cwd=self.source)
+        self.git("checkout", "--detach", "HEAD", cwd=self.source)
+
+        source = self.by_id(self.run_health())["source-status"]
+
+        self.assertEqual(source["label"], "Development checkout")
+        self.assertEqual(source["status"], "warning")
+        self.assertEqual(source["value"], "Check failed")
+
+    def test_missing_git_metadata_keeps_existing_warning(self) -> None:
+        shutil.rmtree(self.source / ".git")
+
+        source = self.by_id(self.run_health())["source-status"]
+
+        self.assertEqual(source["label"], "Development checkout")
+        self.assertEqual(source["status"], "warning")
+        self.assertEqual(source["value"], "Metadata unavailable")
+
+    def test_release_tag_probe_failure_falls_back_to_development_path(self) -> None:
+        self.git("checkout", "--detach", "HEAD", cwd=self.source)
+        probe = self.module["Probe"](fetch=False)
+        real_git = probe.git
+
+        def git_with_failed_tag_probe(root, arguments, timeout=5):
+            if arguments[:2] == ["tag", "--points-at"]:
+                raise RuntimeError("tag metadata unavailable")
+            return real_git(root, arguments, timeout)
+
+        with patch.object(probe, "source_root", return_value=self.source):
+            with patch.object(probe, "git", side_effect=git_with_failed_tag_probe):
+                probe.check_source()
+
+        source = next(check for check in probe.checks if check.id == "source-status")
+        self.assertEqual(source.label, "Development checkout")
+        self.assertEqual(source.status, "warning")
+        self.assertEqual(source.value, "Check failed")
+
+    def test_health_semver_key_matches_trusted_suite_implementation(self) -> None:
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        from scripts.shibumi_suite.cli import (  # trusted repository implementation
+            CliError,
+            version_key as canonical_version_key,
+        )
+
+        health_version_key = self.module["version_key"]
+        valid = (
+            "0.1.1-beta.9",
+            "0.1.1-beta.10",
+            "0.1.1-beta.15",
+            "0.1.1-beta.15.1",
+            "0.1.1",
+            "1.0.0+build.7",
+        )
+        for value in valid:
+            with self.subTest(value=value):
+                self.assertEqual(health_version_key(value), canonical_version_key(value))
+        for value in ("1.2", "01.2.3", "1.2.3-alpha.01", "unknown"):
+            with self.subTest(invalid=value):
+                with self.assertRaises(ValueError):
+                    health_version_key(value)
+                with self.assertRaises(CliError):
+                    canonical_version_key(value)
+
+        self.assertLess(health_version_key("0.1.1-beta.9"), health_version_key("0.1.1-beta.10"))
+        self.assertLess(health_version_key("0.1.1-beta.15"), health_version_key("0.1.1-beta.15.1"))
+        self.assertLess(health_version_key("0.1.1-beta.15.1"), health_version_key("0.1.1"))
+        self.assertEqual(health_version_key("1.0.0+aaa"), health_version_key("1.0.0+zzz"))
+
+    def test_latest_release_tag_skips_unknown_tags_deterministically(self) -> None:
+        latest = self.module["latest_release_tag"]
+
+        self.assertEqual(
+            latest(["v0.1.1-beta.9", "unknown", "v0.1.1-beta.10", "v01.2.3"]),
+            "v0.1.1-beta.10",
+        )
+        self.assertEqual(
+            latest(["v1.0.0+aaa", "v1.0.0+zzz"]),
+            "v1.0.0+zzz",
+        )
+        self.assertIsNone(latest(["release-1.0.0", "v1.0", "v1.0.0-alpha.01"]))
+
     def test_ahead_checkout_is_a_warning(self) -> None:
         self.commit_source("ahead\n")
         payload = self.run_health()
@@ -542,31 +716,94 @@ class HealthDiagnosticsTests(unittest.TestCase):
         self.assertEqual(checks["source-update"]["value"], "Check failed")
         self.assertEqual(checks["source-status"]["value"], "Current · clean")
 
+    def test_release_without_fetch_does_not_contact_or_import_remote_tags(self) -> None:
+        current = "v0.1.1-beta.15"
+        available = "v0.1.1-beta.15.1"
+        self.git("tag", current, cwd=self.source)
+        self.push_remote_tag(available)
+        self.git("checkout", "--detach", current, cwd=self.source)
+        before = self.git_output("rev-parse", "HEAD")
+
+        checks = self.by_id(self.run_health())
+
+        self.assertEqual(self.git_output("rev-parse", "HEAD"), before)
+        self.assertEqual(self.git_output("tag", "--list", available), "")
+        self.assertEqual(checks["source-status"]["value"], f"{current} · clean")
+        self.assertEqual(checks["source-update"]["status"], "info")
+        self.assertEqual(checks["source-update"]["value"], "Not checked")
+
+    def test_release_fetch_detects_semantically_newer_tag_without_changing_head(self) -> None:
+        current = "v0.1.1-beta.15"
+        available = "v0.1.1-beta.15.1"
+        self.git("tag", current, cwd=self.source)
+        self.push_remote_tag(available)
+        self.git("checkout", "--detach", current, cwd=self.source)
+        before = self.git_output("rev-parse", "HEAD")
+
+        checks = self.by_id(self.run_health("--fetch"))
+
+        self.assertEqual(self.git_output("rev-parse", "HEAD"), before)
+        self.assertEqual(checks["source-status"]["status"], "ok")
+        self.assertEqual(checks["source-status"]["value"], f"{current} · clean")
+        self.assertEqual(checks["source-update"]["status"], "warning")
+        self.assertEqual(
+            checks["source-update"]["value"], f"Update available · {available}"
+        )
+
+    def test_equal_build_metadata_precedence_is_not_an_update(self) -> None:
+        current = "v1.0.0+aaa"
+        self.git("tag", current, cwd=self.source)
+        self.push_remote_tag("v1.0.0+zzz")
+        self.git("checkout", "--detach", current, cwd=self.source)
+
+        checks = self.by_id(self.run_health("--fetch"))
+
+        self.assertEqual(checks["source-status"]["value"], f"{current} · clean")
+        self.assertEqual(checks["source-update"]["status"], "ok")
+        self.assertEqual(checks["source-update"]["value"], "Current")
+
+    def test_release_fetch_failure_preserves_meaningful_source_status(self) -> None:
+        tag = "v0.1.1-beta.15"
+        self.git("tag", tag, cwd=self.source)
+        self.git("checkout", "--detach", tag, cwd=self.source)
+        self.git(
+            "remote",
+            "set-url",
+            "origin",
+            str(self.root / "offline.git"),
+            cwd=self.source,
+        )
+
+        checks = self.by_id(self.run_health("--fetch"))
+
+        self.assertEqual(checks["source-status"]["status"], "ok")
+        self.assertEqual(checks["source-status"]["value"], f"{tag} · clean")
+        self.assertEqual(checks["source-update"]["status"], "warning")
+        self.assertEqual(checks["source-update"]["value"], "Check failed")
+        self.assertNotEqual(checks["source-update"]["value"], "Current")
+
     def test_hard_fetch_timeout_is_bounded_and_reported(self) -> None:
-        real_git = shutil.which("git")
-        self.assertIsNotNone(real_git)
-        fake_bin = self.root / "fake-bin"
-        fake_bin.mkdir()
-        fake_git = fake_bin / "git"
-        fake_git.write_text(
-            "#!/usr/bin/env python3\n"
-            "import os, sys, time\n"
-            "if 'fetch' in sys.argv:\n"
-            "    time.sleep(10)\n"
-            f"os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n",
-            encoding="utf-8",
-        )
-        fake_git.chmod(0o755)
-        self.environment["PATH"] = (
-            str(fake_bin) + os.pathsep + self.environment["PATH"]
-        )
-        self.environment["SHIBUMI_HEALTH_FETCH_TIMEOUT"] = "0.05"
+        self.use_timed_out_fetch()
 
         payload = self.run_health("--fetch")
         check = self.by_id(payload)["source-update"]
         self.assertEqual(check["status"], "warning")
         self.assertEqual(check["value"], "Check failed")
         self.assertIn("timed out", check["detail"])
+
+    def test_release_fetch_timeout_preserves_meaningful_source_status(self) -> None:
+        tag = "v0.1.1-beta.15"
+        self.git("tag", tag, cwd=self.source)
+        self.git("checkout", "--detach", tag, cwd=self.source)
+        self.use_timed_out_fetch()
+
+        checks = self.by_id(self.run_health("--fetch"))
+
+        self.assertEqual(checks["source-status"]["status"], "ok")
+        self.assertEqual(checks["source-status"]["value"], f"{tag} · clean")
+        self.assertEqual(checks["source-update"]["status"], "warning")
+        self.assertEqual(checks["source-update"]["value"], "Check failed")
+        self.assertIn("timed out", checks["source-update"]["detail"])
 
     def test_inactive_managed_widget_is_not_a_runtime_failure(self) -> None:
         self.state["activation"]["enableServices"] = []
@@ -615,6 +852,7 @@ class HealthDiagnosticsTests(unittest.TestCase):
             self.process_file,
             [
                 {
+                    "id": self.instance_id,
                     "pid": 4242,
                     "command": "/usr/bin/quickshell",
                     "config_path": str(self.omarchy / "shell/shell.qml"),
@@ -1047,82 +1285,186 @@ class HealthDiagnosticsTests(unittest.TestCase):
         self.assertEqual(check["status"], "ok")
         self.assertEqual(check["value"], "None detected")
 
-    def test_failed_runtime_log_query_never_reports_clean(self) -> None:
+    def test_runtime_log_reuses_cached_instance_without_qs_log(self) -> None:
         environment = dict(self.environment)
-        environment.pop("SHIBUMI_HEALTH_LOG_FILE", None)
+        environment.pop("SHIBUMI_HEALTH_PROCESS_FILE", None)
+        environment.pop("SHIBUMI_HEALTH_PROCESS_LIVE", None)
+        instance = {
+            "id": self.instance_id,
+            "pid": 4242,
+            "config_path": str(self.omarchy / "shell/shell.qml"),
+        }
+
+        def command_result(command, **_kwargs):
+            if command == ["qs", "list", "--all", "--json"]:
+                return Mock(returncode=0, stdout=json.dumps([instance]), stderr="")
+            if command[-2:] == ["shell", "ping"]:
+                return Mock(returncode=0, stdout="ok\n", stderr="")
+            raise AssertionError(f"unexpected command: {command}")
+
+        runner = Mock(side_effect=command_result)
         probe_class = self.module["Probe"]
-        globals_map = probe_class.check_logs.__globals__
-        failed = Mock(
-            returncode=23,
-            stdout="",
-            stderr=f"registry unavailable at {self.home}/private.log",
-        )
-        runner = Mock(return_value=failed)
         with patch.dict(os.environ, environment, clear=True):
             probe = probe_class(fetch=False)
-            probe.production_pids = [4242]
-            with patch.dict(globals_map, {"run": runner}):
+            with patch.dict(probe_class.load_processes.__globals__, {"run": runner}):
+                probe.load_processes()
+                probe.check_processes()
                 probe.check_logs()
-        runner.assert_called_once_with(
-            [
-                "qs", "log", "--pid", "4242", "--tail", "400",
-                "--no-color", "--log-times",
-            ],
-            timeout=5,
-        )
-        checks = [
-            check for check in probe.checks if check.id == "runtime-errors"
-        ]
-        self.assertEqual(len(checks), 1)
-        self.assertEqual(checks[0].status, "warning")
-        self.assertEqual(checks[0].value, "Log unavailable")
-        self.assertIn("registry unavailable", checks[0].detail)
-        self.assertNotIn(str(self.home), checks[0].detail)
-        self.assertNotEqual(checks[0].value, "None detected")
 
-    def test_failed_runtime_log_query_redacts_sensitive_output(self) -> None:
-        environment = dict(self.environment)
-        environment.pop("SHIBUMI_HEALTH_LOG_FILE", None)
-        probe_class = self.module["Probe"]
-        globals_map = probe_class.check_logs.__globals__
-        failed = Mock(
-            returncode=9,
-            stdout="",
-            stderr="password token private-value",
+        commands = [call.args[0] for call in runner.call_args_list]
+        self.assertEqual(commands.count(["qs", "list", "--all", "--json"]), 1)
+        self.assertFalse(any(command[:2] == ["qs", "log"] for command in commands))
+        self.assertEqual(probe.production_instance_id, self.instance_id)
+        self.assertEqual(
+            next(check for check in probe.checks if check.id == "runtime-errors").value,
+            "None detected",
         )
-        with patch.dict(os.environ, environment, clear=True):
+
+    def assert_log_unavailable(self, detail: str) -> None:
+        check = self.by_id(self.run_health())["runtime-errors"]
+        self.assertEqual(check["status"], "warning")
+        self.assertEqual(check["value"], "Log unavailable")
+        self.assertIn(detail, check["detail"])
+
+    def read_runtime_log_with_read_sizes(self) -> tuple[str, list[int]]:
+        probe = self.module["Probe"](fetch=False)
+        probe.production_instance_id = self.instance_id
+        real_read = os.read
+        read_sizes: list[int] = []
+
+        def counted_read(fd: int, size: int) -> bytes:
+            read_sizes.append(size)
+            return real_read(fd, size)
+
+        with patch.dict(os.environ, self.environment, clear=True):
+            with patch.object(os, "read", side_effect=counted_read):
+                raw = probe.read_runtime_log()
+        return raw, read_sizes
+
+    def test_empty_runtime_text_log_is_unavailable(self) -> None:
+        for content in ("", "\n \t\n"):
+            with self.subTest(content=repr(content)):
+                self.log_file.write_text(content, encoding="utf-8")
+                self.assert_log_unavailable("empty sample")
+
+    def test_missing_runtime_text_log_is_unavailable(self) -> None:
+        self.log_file.unlink()
+        self.assert_log_unavailable("No such file")
+
+    def test_symlinked_runtime_text_log_is_unavailable(self) -> None:
+        target = self.root / "decoy.log"
+        target.write_text("TypeError from decoy\n", encoding="utf-8")
+        self.log_file.unlink()
+        self.log_file.symlink_to(target)
+        self.assert_log_unavailable("symbolic links")
+
+    def test_symlinked_runtime_log_parent_is_unavailable(self) -> None:
+        target = self.root / "decoy-instance"
+        target.mkdir()
+        (target / "log.log").write_text("TypeError from decoy\n", encoding="utf-8")
+        shutil.rmtree(self.log_dir)
+        self.log_dir.symlink_to(target, target_is_directory=True)
+        self.assert_log_unavailable("Not a directory")
+
+    def test_runtime_log_fifo_is_rejected_without_blocking(self) -> None:
+        self.log_file.unlink()
+        os.mkfifo(self.log_file)
+        self.assert_log_unavailable("not a regular file")
+
+    def test_foreign_owned_runtime_log_is_unavailable(self) -> None:
+        real_fstat = os.fstat
+
+        def foreign_file(fd):
+            metadata = real_fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                return metadata
+            values = list(metadata)
+            values[4] = os.getuid() + 1
+            return os.stat_result(values)
+
+        probe_class = self.module["Probe"]
+        with patch.dict(os.environ, self.environment, clear=True):
             probe = probe_class(fetch=False)
             probe.production_pids = [4242]
-            with patch.dict(globals_map, {"run": Mock(return_value=failed)}):
+            probe.production_instance_id = self.instance_id
+            with patch.object(os, "fstat", side_effect=foreign_file):
                 probe.check_logs()
-        check = next(
-            check for check in probe.checks if check.id == "runtime-errors"
+        check = next(check for check in probe.checks if check.id == "runtime-errors")
+        self.assertEqual(check.value, "Log unavailable")
+        self.assertIn("foreign owner", check.detail)
+
+    def test_malformed_instance_id_is_unavailable(self) -> None:
+        processes = json.loads(self.process_file.read_text(encoding="utf-8"))
+        processes[0]["id"] = "../decoy"
+        self.write_json(self.process_file, processes)
+        self.assert_log_unavailable("missing or malformed")
+
+    def test_runtime_log_read_counts_at_size_boundaries(self) -> None:
+        full_limit = self.module["LOG_FULL_READ_LIMIT"]
+        tail_bytes = self.module["LOG_TAIL_BYTES"]
+        chunk_size = 64 * 1024
+        cases = (
+            (full_limit - 1, 128, full_limit - 1),
+            (full_limit, 128, full_limit),
+            (full_limit + 1, 16, tail_bytes),
         )
-        self.assertEqual(check.status, "warning")
-        self.assertEqual(check.detail, "qs log exited with 9")
-        self.assertNotIn("private-value", check.detail)
 
-    def test_empty_runtime_log_query_never_reports_clean(self) -> None:
-        environment = dict(self.environment)
-        environment.pop("SHIBUMI_HEALTH_LOG_FILE", None)
+        for file_size, expected_calls, expected_bytes in cases:
+            with self.subTest(file_size=file_size):
+                with self.log_file.open("wb") as handle:
+                    handle.truncate(file_size)
+                _raw, read_sizes = self.read_runtime_log_with_read_sizes()
+                self.assertEqual(len(read_sizes), expected_calls)
+                self.assertEqual(sum(read_sizes), expected_bytes)
+                self.assertTrue(all(size <= chunk_size for size in read_sizes))
+
+    def test_large_runtime_log_removes_first_partial_line(self) -> None:
+        full_limit = self.module["LOG_FULL_READ_LIMIT"]
+        tail_bytes = self.module["LOG_TAIL_BYTES"]
+        file_size = full_limit + 256
+        offset = file_size - tail_bytes
+        with self.log_file.open("wb") as handle:
+            handle.truncate(file_size)
+            handle.seek(offset - len(b"discard-"))
+            handle.write(
+                b"discard-partial line\nINFO Configuration Loaded\n"
+                b"TypeError in /home/test/Tail.qml:7\n"
+            )
+
+        raw, _read_sizes = self.read_runtime_log_with_read_sizes()
+        self.assertTrue(raw.startswith("INFO Configuration Loaded\n"))
+        self.assertNotIn("partial line", raw)
+
+        check = self.by_id(self.run_health())["runtime-errors"]
+        self.assertEqual(check["status"], "error")
+        self.assertIn("~/Tail.qml:7", check["detail"])
+        self.assertNotIn("partial line", check["detail"])
+
+    def test_runtime_log_read_stays_at_open_time_size_when_file_grows(self) -> None:
+        initial = self.log_file.stat()
+        real_fstat = os.fstat
+        appended = False
+
+        def append_after_stat(fd):
+            nonlocal appended
+            metadata = real_fstat(fd)
+            if stat.S_ISREG(metadata.st_mode) and not appended:
+                appended = True
+                with self.log_file.open("ab") as handle:
+                    handle.write(b"TypeError appended after stat\n")
+                return initial
+            return metadata
+
         probe_class = self.module["Probe"]
-        globals_map = probe_class.check_logs.__globals__
-        for stdout in ("", "\n \t\n"):
-            with self.subTest(stdout=stdout):
-                completed = Mock(returncode=0, stdout=stdout, stderr="")
-                with patch.dict(os.environ, environment, clear=True):
-                    probe = probe_class(fetch=False)
-                    probe.production_pids = [4242]
-                    with patch.dict(globals_map, {"run": Mock(return_value=completed)}):
-                        probe.check_logs()
-
-                check = next(
-                    check for check in probe.checks if check.id == "runtime-errors"
-                )
-                self.assertEqual(check.status, "warning")
-                self.assertEqual(check.value, "Log unavailable")
-                self.assertIn("empty sample", check.detail)
-                self.assertNotEqual(check.value, "None detected")
+        with patch.dict(os.environ, self.environment, clear=True):
+            probe = probe_class(fetch=False)
+            probe.production_pids = [4242]
+            probe.production_instance_id = self.instance_id
+            with patch.object(os, "fstat", side_effect=append_after_stat):
+                probe.check_logs()
+        check = next(check for check in probe.checks if check.id == "runtime-errors")
+        self.assertTrue(appended)
+        self.assertEqual(check.value, "None detected")
 
     def test_manual_fetch_refreshes_only_remote_refs(self) -> None:
         before = subprocess.run(

@@ -18,7 +18,7 @@ Item {
   SuiteRuntime.HostShell { id: suiteShell; host: root.shell }
   SuiteRuntime.Provider {
     pluginId: "hancore.shibumi.quick-access"
-    implementationVersion: "0.1.1-beta.14.1"
+    implementationVersion: "0.2.5"
     owner: root
     host: root.shell
     manifest: root.manifest
@@ -26,6 +26,7 @@ Item {
   property bool runtimeWorkersEnabled: true
   property bool presentationEnabled: true
   readonly property var stateService: suiteShell.serviceFor("hancore.shibumi.state")
+  readonly property var idleService: suiteShell.firstPartyServiceFor("omarchy.idle")
   readonly property var bar: shell ? shell.bar : null
   // Tests may substitute an isolated screen list; production follows the
   // public reactive Quickshell screen collection.
@@ -65,7 +66,9 @@ Item {
     ? imagePickerStyle : mediaPickerStyle
   readonly property bool usingOfficialPicker: imageMode
     && imagePickerStyle === "omarchy"
-  property bool idleInhibited: false
+  property bool localIdleInhibited: false
+  readonly property bool idleInhibited: idleService
+    ? idleService.stayAwake === true : localIdleInhibited
   property var activeScreen: null
   property string activeScreenName: activeScreen ? String(activeScreen.name || "") : ""
   property var entries: []
@@ -100,7 +103,7 @@ Item {
   readonly property string emptyText: loading ? "Loading " + title.toLowerCase() + "..."
     : "No " + title.toLowerCase() + " found"
   readonly property string currentThemeNamePath:
-    home + "/.local/state/omarchy/current/theme.name"
+    SuiteRuntime.HostContract.path(home, "themeNameFile")
   readonly property bool overlayLoaded: overlayLoader.item !== null
   readonly property bool overlayActive: overlayLoader.active
   readonly property bool pickerWorkersRunning: currentProc.running
@@ -176,8 +179,12 @@ Item {
   }
 
   function toggleIdleInhibitor() {
-    idleInhibited = !idleInhibited
-    return idleInhibited
+    if (idleService && typeof idleService.setIdleEnabled === "function") {
+      idleService.setIdleEnabled(idleInhibited)
+      return idleInhibited
+    }
+    localIdleInhibited = !localIdleInhibited
+    return localIdleInhibited
   }
 
   function syncOverlay() {
@@ -279,7 +286,7 @@ Item {
     if (!opened) return
     requestSerial++
     if (officialPickerProc.running)
-      Quickshell.execDetached(["omarchy-shell", "image-selector", "cancel"])
+      Quickshell.execDetached([SuiteRuntime.HostContract.shellCommand, "image-selector", "cancel"])
     opened = false
     activeScreen = null
     confirmDelete = false
@@ -441,7 +448,7 @@ Item {
           : [selectedIndex - distance, selectedIndex + distance]
         for (let j = 0; j < indexes.length; j++) {
           const entry = filteredEntries[indexes[j]]
-          if (!entry || !entry.sourcePath || isThumbnailReady(entry)
+          if (!entry || !entry.sourcePath || !entry.thumbnailPath || isThumbnailReady(entry)
               || seen[entry.sourcePath]) continue
           seen[entry.sourcePath] = true
           result.push(entry.sourcePath)
@@ -451,7 +458,7 @@ Item {
     }
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]
-      if (!entry || !entry.sourcePath || isThumbnailReady(entry)
+      if (!entry || !entry.sourcePath || !entry.thumbnailPath || isThumbnailReady(entry)
           || seen[entry.sourcePath]) continue
       seen[entry.sourcePath] = true
       result.push(entry.sourcePath)
@@ -516,7 +523,7 @@ Item {
     actionProc.actionKind = String(kind || "")
     actionProc.actionLabel = String(label || "")
     actionProc.errorText = ""
-    actionProc.command = command
+    actionProc.command = ["bash", "-c", 'exec "$@" </dev/null', "shibumi-picker-action"].concat(command)
     actionProc.running = true
     return true
   }
@@ -771,7 +778,11 @@ Item {
         "if [[ -f $d/.git/config ]]; then",
         "repo=$(sed -nE 's#^[[:space:]]*url = (.*)$#\\1#p' \"$d/.git/config\" | head -1);",
         "author=$(printf '%s' \"$repo\" | sed -nE 's#.*github\\.com[:/]+([^/]+)/.*#\\1#p'); fi;",
-        "palette=$(awk -F'\"' '$2 ~ /^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/ { if (out != \"\") out=out \",\"; out=out $2; if (++n == 6) exit } END { print out }' \"$d/colors.toml\" 2>/dev/null);",
+        "palette=$(awk -F'\"' '$2 ~ /^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/ {",
+        "key=$1; gsub(/[[:space:]=]/, \"\", key); colors[key]=$2",
+        "} END { split(\"red green yellow blue magenta cyan\", names, \" \");",
+        "for (i=1; i<=6; i++) { color=colors[\"color\" i]; if (color == \"\") color=colors[names[i]];",
+        "if (color != \"\") { printf \"%s%s\", sep, color; sep=\",\" } } print \"\" }' \"$d/" + SuiteRuntime.HostContract.fileName("themeColorsFile") + "\" 2>/dev/null);",
         "printf '%s\\t%s\\t%s\\n' \"$author\" \"$repo\" \"$palette\""
       ].join(" "), "shibumi-theme-meta", directory]
       themeMetaProc.running = true

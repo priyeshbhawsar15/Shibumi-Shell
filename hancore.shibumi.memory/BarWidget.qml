@@ -26,11 +26,13 @@ Ui.Panel {
     ? tokens.widgetContentColor(settings,
       bar ? bar.urgent : Commons.Color.accent)
     : (bar ? bar.urgent : Commons.Color.accent)
-  readonly property string displayMode: String(
+  readonly property bool iconOnly: tokens.v2Shell !== true
+    && setting("displayMode", "full") === "icon-only"
+  readonly property string displayMode: iconOnly ? "icon" : String(
     setting("displayMode", setting("compact", false) ? "icon" : "full"))
   readonly property bool compact: displayMode === "icon"
-  readonly property bool horizontalValueVisible: displayMode !== "icon"
-    || tokens.v2Shell !== true
+  readonly property bool horizontalValueVisible: !iconOnly
+    && (displayMode !== "icon" || tokens.v2Shell !== true)
   readonly property int percent: telemetry ? telemetry.memPercent : 0
   readonly property real usedGiB: telemetry ? telemetry.memUsedGiB : 0
   readonly property real totalGiB: telemetry ? telemetry.memTotalGiB : 0
@@ -128,7 +130,8 @@ Ui.Panel {
       spacing: root.displayMode === "full" && root.tokens.v2Shell !== true
         ? root.tokens.contentGap : root.tokens.compactGap
 
-      Text {
+      Presentation.IconText {
+        barText: true
         visible: root.displayMode === "full" && root.tokens.v2Shell !== true
         anchors.verticalCenter: parent.verticalCenter
         text: "MEM"
@@ -141,6 +144,12 @@ Ui.Panel {
       }
 
       MemoryRing {
+        id: memoryGlyph
+        Presentation.BarInk { id: memoryInk; target: memoryGlyph }
+        transform: Translate {
+          x: memoryInk.enabled ? memoryInk.snapX(0) : 0
+          y: memoryInk.enabled ? memoryInk.rectangleY(memoryGlyph.height) : 0
+        }
         visible: root.displayMode !== "text"
         anchors.verticalCenter: parent.verticalCenter
         percent: root.percent
@@ -148,7 +157,8 @@ Ui.Panel {
         accent: root.widgetInk
       }
 
-      Text {
+      Presentation.IconText {
+        barText: true
         visible: root.horizontalValueVisible
         anchors.verticalCenter: parent.verticalCenter
         text: root.usedLabel
@@ -174,6 +184,7 @@ Ui.Panel {
       }
 
       Text {
+        visible: !root.iconOnly
         anchors.horizontalCenter: parent.horizontalCenter
         text: root.usedLabel
         color: root.widgetInk

@@ -116,7 +116,6 @@ Column {
     Commons.Style.font.bodySmall * uiScale
   readonly property real detailFontSize:
     Commons.Style.font.caption * uiScale
-  readonly property int labelFontWeight: Font.DemiBold
   readonly property int valueFontWeight: Font.DemiBold
   readonly property int detailFontWeight: Font.Normal
 
@@ -445,11 +444,11 @@ Column {
 
       Repeater {
         id: barRepeater
-        model: root.barOptions
+        model: root.barOptions.length
 
         delegate: Rectangle {
           id: barOption
-          required property var modelData
+          readonly property var modelData: root.barOptions[index]
           required property int index
           readonly property color optionFill: modelData.active
             ? root.surfaceFill(true, optionPointer.containsMouse)

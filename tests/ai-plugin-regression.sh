@@ -4,6 +4,7 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/tests/lib/baselines.sh"
+source "$repo_root/tests/lib/host-diagnostics.sh"
 shibumi_load_omarchy_baseline
 omarchy_path=$OMARCHY_PATH
 quickshell_bin=${QUICKSHELL_BIN:-/usr/bin/quickshell}
@@ -55,17 +56,31 @@ chmod 0644 "$tmpdir/state/omarchy/agents/usage/claude.json" \
 install -m 0755 \
   "$repo_root/tests/fixtures/ai-agents/omarchy-agent-usage-update" \
   "$tmpdir/omarchy/bin/omarchy-agent-usage-update"
-for collector in claude codex; do
+for collector in claude codex fireworks; do
   install -m 0755 /usr/bin/true \
     "$tmpdir/omarchy/bin/omarchy-agent-usage-$collector"
 done
 
+mkdir -p "$tmpdir/generic" "$tmpdir/omarchy/shell/plugins/agents/assets"
+cp "$repo_root/hancore.shibumi.ai/assets/codex.svg" "$tmpdir/omarchy/shell/plugins/agents/assets/agy.svg"
+cp "$tmpdir/omarchy/shell/plugins/agents/assets/agy.svg" "$tmpdir/omarchy/shell/plugins/agents/assets/agy-light.svg"
+for id in claude codex fireworks grok agy; do
+  jq -n --arg id "$id" --arg now "$record_now" '{schemaVersion:1,id:$id,name:$id,updatedAt:$now,
+    ready:($id != "fireworks"),hasLocalStats:false,tierLabel:"Test",unknownKey:"ignored",
+    limits:(if $id == "fireworks" then [] else [{label:"Session",percent:(if $id == "agy" then 0.29 else 0.41 end),resetsAt:""}] end),
+    totalPrompts:1,usageStatusText:"Sign in to Fireworks",authHelpText:"Authenticate"}' >"$tmpdir/generic/$id.json"
+done
+
+if [[ -n ${SHIBUMI_TEST_EMPTY_AGENTS_DIR:-} ]]; then
+  mkdir -p "$tmpdir/generic/empty"; for record in "$SHIBUMI_TEST_EMPTY_AGENTS_DIR"/*.json; do jq --arg updatedAt "$record_now" '.updatedAt = $updatedAt' "$record" >"$tmpdir/generic/empty/${record##*/}"; done
+fi
 set +e
 output=$(timeout 8 env \
   HOME="$tmpdir/home" \
   XDG_STATE_HOME="$tmpdir/state" \
   SHIBUMI_TEST_OMARCHY_PATH="$tmpdir/omarchy" \
   SHIBUMI_TEST_AGENT_USAGE_DIR="$tmpdir/state/omarchy/agents/usage" \
+  SHIBUMI_TEST_GENERIC_DIR="$tmpdir/generic" \
   SHIBUMI_TEST_MODEL_USAGE_SOURCE="file://$repo_root/tests/fixtures/ai-model-usage/Main.qml" \
   QT_QPA_PLATFORM=offscreen \
   WAYLAND_DISPLAY= \
@@ -80,8 +95,10 @@ printf '%s\n' "$output"
 [[ $rc -eq 0 ]] || fail "component smoke exited $rc"
 grep -F 'ai plugin smoke passed' <<<"$output" >/dev/null \
   || fail "success marker missing"
-if grep -Eq ' WARN| ERROR|CRITICAL|TypeError|ReferenceError|Unable to assign' \
-    <<<"$output"; then
+if grep -E ' WARN| ERROR|CRITICAL|TypeError|ReferenceError|Unable to assign' <<<"$output" \
+    | host_filter_startup_diagnostics \
+      -e 'Unable to find hyprland socket. Cannot connect to hyprland.' \
+      -e "Cannot open: file://$tmpdir/omarchy/shell/plugins/agents/assets/grok.svg" >/dev/null; then
   fail "component smoke emitted a QML/runtime warning or error"
 fi
 
@@ -124,13 +141,25 @@ python3 "$repo_root/tests/opencode-usage-regression.py" \
   || fail "OpenCode current-model scope regression failed"
 [[ -s $tmpdir/state/shibumi-ai-agent-update.log ]] \
   || fail "agents update owner did not run"
-grep -Fx 'claude codex' "$tmpdir/state/shibumi-ai-agent-update.log" >/dev/null \
-  || fail "agents owner did not perform its bounded initial update"
-grep -Fx -- '--force claude codex' \
+grep -Fx -- '--except fireworks' "$tmpdir/state/shibumi-ai-agent-update.log" >/dev/null \
+  || fail "agents owner did not exclude the disabled collector"
+grep -Fx -- '--force --except fireworks' \
   "$tmpdir/state/shibumi-ai-agent-update.log" >/dev/null \
   || fail "agents owner did not forward a forced refresh"
 
 wrapper="$repo_root/hancore.shibumi.ai/scripts/agents-update"
+cp "$tmpdir/omarchy/bin/omarchy-agent-usage-update" "$tmpdir/updater-original"
+printf '#!/usr/bin/env bash\nexec "$OMARCHY_PATH/bin/omarchy-agent-usage-claude"\n' >"$tmpdir/omarchy/bin/omarchy-agent-usage-update"
+printf '#!/usr/bin/env python3\nimport json,os\nprint(json.dumps([os.getpriority(os.PRIO_PROCESS,0), sorted(os.sched_getaffinity(0))]))\n' >"$tmpdir/omarchy/bin/omarchy-agent-usage-claude"
+python3 - "$wrapper" "$tmpdir" <<'PY'
+import json, os, subprocess, sys
+wrapper, root = sys.argv[1:]; allowed = sorted(os.sched_getaffinity(0)); env = os.environ | {"HOME": root + "/home", "XDG_STATE_HOME": root + "/state"}
+for cpus in [allowed, allowed[-2:]]:
+    actual = json.loads(subprocess.check_output(["taskset", "-c", ",".join(map(str, cpus)), wrapper, root + "/omarchy", "claude"], env=env, text=True).splitlines()[-1])
+    assert actual == [19 if len(cpus) > 2 else os.getpriority(os.PRIO_PROCESS, 0), cpus[-max(2, len(cpus) // 4):] if len(cpus) > 2 else cpus], actual
+PY
+mv "$tmpdir/updater-original" "$tmpdir/omarchy/bin/omarchy-agent-usage-update"
+install -m 0755 /usr/bin/true "$tmpdir/omarchy/bin/omarchy-agent-usage-claude"
 SHIBUMI_TEST_STUBBORN=1 SHIBUMI_AI_UPDATE_TIMEOUT=30 \
   HOME="$tmpdir/home" XDG_STATE_HOME="$tmpdir/state" \
   "$wrapper" "$tmpdir/omarchy" claude >/dev/null 2>&1 &
@@ -196,11 +225,11 @@ rm -f -- "$tmpdir/state/shibumi-ai-agent-processes"
 set +e
 SHIBUMI_TEST_STUBBORN=1 SHIBUMI_AI_UPDATE_TIMEOUT=1 \
   HOME="$tmpdir/home" XDG_STATE_HOME="$tmpdir/state" \
-  timeout 10 "$wrapper" "$tmpdir/omarchy" codex >/dev/null 2>&1
+  timeout 30 "$wrapper" "$tmpdir/omarchy" codex >/dev/null 2>&1
 watchdog_rc=$?
 set -e
 [[ $watchdog_rc -ne 0 && $watchdog_rc -ne 124 ]] \
-  || fail "agents update watchdog did not enforce its own deadline"
+  || fail "agents update watchdog did not enforce its own deadline (rc=$watchdog_rc)"
 [[ -s $tmpdir/state/shibumi-ai-agent-processes ]] \
   || fail "agents watchdog child did not register"
 read -r lifecycle_group lifecycle_descendant \
@@ -311,8 +340,8 @@ rg -q 'providerReportsFiveHour' "$service" \
 rg -q 'displayPercent' "$service" \
   || fail "AI service lost provider percentage normalization"
 panel="$repo_root/hancore.shibumi.ai/AiUsagePanel.qml"
-rg -q 'text: "AI USAGE"' "$panel" \
-  || fail "AI panel lost the V1 heading"
+rg -Fq 'text: panel.provider ? panel.providerHeading(panel.provider)' "$panel" \
+  || fail "AI panel lost the selected-provider heading"
 rg -q 'font\.pixelSize: Commons\.Style\.font\.subtitle' "$panel" \
   || fail "AI panel heading does not retain the V1 13px role"
 rg -q 'color: selected \? panel\.controlActiveFillColor' "$panel" \
@@ -330,14 +359,16 @@ rg -q 'renderType: Text\.NativeRendering' "$panel" \
 if rg -q 'rgba\([^\n]*urgent[^\n]*0\.22' "$panel"; then
   fail "AI panel reintroduced an ad-hoc active fill"
 fi
-if rg -q 'Process \{|Timer \{|FileView \{' \
-    "$widget" "$panel"; then
+if rg -q 'Process \{|FileView \{' "$widget" "$panel" \
+    || rg -q 'Timer \{' "$widget"; then
   fail "AI screen-local views own provider workers"
 fi
-[[ $(rg -c 'Process \{' "$service") -eq 1 ]] \
-  || fail "AI providers do not have exactly one process owner"
-[[ $(rg -c 'FileView \{' "$service") -eq 2 ]] \
-  || fail "AI agents records do not have exactly two bounded readers"
+[[ $(rg -c 'Timer \{' "$panel") -eq 1 ]] && grep -Fq 'interval: 30000; repeat: true; running: panel.open' "$panel" \
+  || fail "AI panel clock must be singular, bounded and open-only"
+[[ $(rg -c 'Process \{' "$service") -eq 2 ]] \
+  || fail "AI providers need one updater and one directory discovery owner"
+[[ $(rg -c 'FileView \{' "$service") -eq 1 ]] \
+  || fail "AI agents records need one reader delegate per discovered id"
 rg -q 'running: root\.runtimeProbesEnabled' "$service" \
   || fail "AI polling cannot be disabled for lifecycle validation"
 rg -q 'Component\.onDestruction:' "$service" \

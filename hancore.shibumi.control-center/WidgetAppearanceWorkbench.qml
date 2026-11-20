@@ -70,6 +70,7 @@ Column {
     String(selectedWidget ? selectedWidget.catalogGroup || "" : "")
   readonly property bool selectedLauncher: selectedCatalogGroup === "G1"
   readonly property bool selectedMedia: selectedCatalogGroup === "G9"
+  readonly property bool selectedBattery: selectedCatalogGroup === "G12"
   readonly property bool v1LayoutActive: controller.v2LayoutActive !== true
   readonly property bool selectedV1Appearance: v1LayoutActive
     && selectedSupported
@@ -82,7 +83,7 @@ Column {
   readonly property bool selectedSupported: selectedWidget
     && String(selectedWidget.group || "") !== ""
   readonly property string selectedDisplayMode: selectedSupported
-    ? selectedLauncher
+    ? selectedLauncher && !v1LayoutActive
       ? String(controller.launcherConfig.mode || "text")
       : widgetMode(selectedWidget.group, selectedCatalogGroup)
     : "full"
@@ -97,6 +98,9 @@ Column {
     ? String(widgetSetting(selectedWidget.group, "color", "inherit")) : "inherit"
   readonly property string selectedContentTone: selectedSupported
     ? String(widgetSetting(selectedWidget.group, "tone", "auto")) : "auto"
+  readonly property string selectedBatteryOrientation: selectedBattery
+    && widgetSetting(selectedWidget.group, "batteryOrientation", "horizontal")
+      === "vertical" ? "vertical" : "horizontal"
   readonly property real selectedSurfaceOpacity: selectedSupported
     ? Number(widgetSetting(selectedWidget.group, "surfaceOpacity", 1)) : 1
   readonly property real selectedOutlineWidth: selectedSupported
@@ -151,6 +155,7 @@ Column {
     && profileModeChoices.ready
     && mediaContentToneChoices.ready
     && contentToneChoices.ready
+    && orientationChoices.ready
     && surfaceModeChoices.ready
     && outlineChoices.ready
     && fillColorPalette.ready
@@ -191,10 +196,6 @@ Column {
       glyph: "widgets", modes: ["full"], region: "",
       supported: false, active: false
     })
-  }
-
-  function isEditableWidget(groupValue, idValue) {
-    return editableOption(groupValue, idValue) !== null
   }
 
   function pluginIdForGroup(groupValue) {
@@ -389,6 +390,9 @@ Column {
         const settingsGroup = String(groups[groupIndex] || "")
         const catalogGroup = catalogGroupForActiveGroup(settingsGroup)
         const source = catalogOptionForGroup(catalogGroup)
+        const activeBar = controller && "bar" in controller ? controller.bar : null
+        if (activeBar && typeof activeBar.isTrayOnlyWidget === "function"
+            && activeBar.isTrayOnlyWidget(pluginIdForGroup(settingsGroup))) continue
         const supportedGroup = activeGroupIds.indexOf(catalogGroup) >= 0
           || settingsGroup.indexOf("G:") === 0
         if (!source || !supportedGroup || seen[catalogGroup] === true
@@ -412,6 +416,9 @@ Column {
   function widgetAppearanceChanged(groupValue) {
     const group = String(groupValue || "")
     const catalogGroup = catalogGroupForSettingsGroup(group)
+    if (catalogGroup === "G12"
+        && widgetSetting(group, "batteryOrientation", "horizontal") === "vertical")
+      return true
     if (controller.v2LayoutActive !== true) {
       const fillChanged =
         String(widgetSetting(group, "color", "inherit")) !== "inherit"
@@ -446,11 +453,6 @@ Column {
     return controller.accentColor("color03")
   }
 
-  function isActiveWidget(groupValue) {
-    const option = editableOption(groupValue, "")
-    return option !== null && option.active === true
-  }
-
   function catalogGroupForSettingsGroup(groupValue) {
     const group = String(groupValue || "")
     if (group.indexOf("G:") !== 0) return group
@@ -460,21 +462,26 @@ Column {
   function modeOptionsForGroup(groupValue, catalogGroupValue) {
     const catalogGroup = String(catalogGroupValue
       || catalogGroupForSettingsGroup(groupValue) || "")
-    if (catalogGroup === "G1") return []
-    if (catalogGroup === "G9") return mediaStyleOptions
-    if (controller.v2LayoutActive === true) return displayModeOptions
-    const compactAvailable = v1CompactGroupIds.indexOf(catalogGroup) >= 0
-    return compactAvailable ? [
-      { value: "full", label: "Default", enabled: true },
-      { value: "icon", label: "Compact", enabled: true }
-    ] : [
+    if (controller.v2LayoutActive === true) {
+      if (catalogGroup === "G1") return []
+      if (catalogGroup === "G9") return mediaStyleOptions
+      return displayModeOptions
+    }
+    const options = catalogGroup === "G9" ? mediaStyleOptions.slice() : [
       { value: "full", label: "Default", enabled: true }
     ]
+    if (v1CompactGroupIds.indexOf(catalogGroup) >= 0)
+      options.push({ value: "icon", label: "Compact", enabled: true })
+    if (/^G([1-9]|1[0-5])$/.test(catalogGroup))
+      options.push({ value: "icon-only", label: "Icon only", enabled: true })
+    return options
   }
 
   function widgetMode(group, catalogGroupValue) {
     const catalogGroup = String(catalogGroupValue
       || catalogGroupForSettingsGroup(group) || "")
+    if (v1LayoutActive && widgetSetting(group, "displayMode", "full") === "icon-only")
+      return "icon-only"
     if (catalogGroup === "G9")
       return String(widgetSetting(group, "mediaStyle", "default")) === "full"
         ? "full" : "default"
@@ -507,22 +514,28 @@ Column {
   function widgetPresentationLabel(group, catalogGroupValue) {
     const catalogGroup = String(catalogGroupValue
       || catalogGroupForSettingsGroup(group) || "")
-    if (catalogGroup === "G1")
+    if (catalogGroup === "G1" && !v1LayoutActive)
       return "Logo · " + (String(controller.launcherConfig.mode || "text")
         === "icon" ? "Icon" : "Wordmark")
     return displayModeLabel(group, widgetMode(group, catalogGroup))
   }
 
   function setWidgetMode(mode) {
-    if (!selectedSupported || selectedLauncher) return false
+    if (!selectedSupported || (selectedLauncher && !v1LayoutActive)) return false
     const value = String(mode)
     const available = selectedModeOptions.some(function(option) {
       return String(option.value) === value && option.enabled !== false
     })
     if (!available) return false
-    if (selectedMedia)
-      return controller.setGroupSetting(
-        selectedWidget.group, "mediaStyle", value)
+    if (selectedMedia) {
+      let changed = false
+      if (v1LayoutActive) {
+        if (value === "icon-only")
+          return controller.setGroupSetting(selectedWidget.group, "displayMode", value)
+        changed = controller.setGroupSetting(selectedWidget.group, "displayMode", "full")
+      }
+      return controller.setGroupSetting(selectedWidget.group, "mediaStyle", value) || changed
+    }
     return controller.setGroupSetting(
       selectedWidget.group, "displayMode", value)
   }
@@ -1074,32 +1087,62 @@ Column {
           }
 
           Row {
+            id: presentationRow
             visible: root.selectedSupported && !root.selectedMedia
             width: parent.width
             spacing: Commons.Style.space(8)
 
-            Column {
-              visible: !root.selectedLauncher
+            Item {
+              visible: !root.selectedLauncher || root.v1LayoutActive
               width: root.v1LayoutActive
                 ? (parent.width - parent.spacing) * 2 / 3
                 : (parent.width - parent.spacing * 2) / 3 * 2
                   + parent.spacing
-              spacing: Commons.Style.space(4)
+              height: presentationChoices.implicitHeight
 
-              FieldLabel { text: "PRESENTATION" }
+              Column {
+                id: presentationChoices
+                width: parent.width
+                spacing: Commons.Style.space(4)
 
-              RadioChoiceList {
-                id: contentModeChoices
-                height: root.choiceListHeight
-                options: root.selectedModeOptions
-                currentValue: root.selectedDisplayMode
-                onChosen: value => root.setWidgetMode(value)
+                FieldLabel { text: "PRESENTATION" }
+
+                RadioChoiceList {
+                  id: contentModeChoices
+                  height: root.choiceListHeight
+                  options: root.selectedModeOptions
+                  currentValue: root.selectedDisplayMode
+                  onChosen: value => root.setWidgetMode(value)
+                }
+              }
+
+              Column {
+                visible: root.selectedBattery
+                x: (presentationRow.width - presentationRow.spacing * 2) / 3
+                  + presentationRow.spacing
+                width: parent.width - x
+                spacing: Commons.Style.space(4)
+
+                FieldLabel { text: "ORIENTATION" }
+
+                RadioChoiceList {
+                  id: orientationChoices
+                  height: contentModeChoices.height
+                    / contentModeChoices.options.length * options.length
+                  options: [
+                    { value: "horizontal", label: "Horizontal" },
+                    { value: "vertical", label: "Vertical" }
+                  ]
+                  currentValue: root.selectedBatteryOrientation
+                  onChosen: value => root.controller.setGroupSetting(
+                    root.selectedWidget.group, "batteryOrientation", value)
+                }
               }
             }
 
             Column {
               visible: !root.v1LayoutActive || root.selectedV1Appearance
-              width: root.selectedLauncher ? parent.width
+              width: root.selectedLauncher && !root.v1LayoutActive ? parent.width
                 : root.v1LayoutActive
                   ? (parent.width - parent.spacing) / 3
                   : (parent.width - parent.spacing * 2) / 3

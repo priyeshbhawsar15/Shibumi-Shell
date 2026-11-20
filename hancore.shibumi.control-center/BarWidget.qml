@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Effects
 import qs.Ui as Ui
+import qs.Commons as Commons
 import "HostIdentity.js" as HostIdentity
 import "../hancore.shibumi.state/runtime" as SuiteRuntime
 import "../hancore.shibumi.state/lib/presentation" as Presentation
@@ -16,6 +17,12 @@ Ui.Panel {
 
   SuiteRuntime.HostShell { id: suiteShell; host: root.bar ? root.bar.shell : null }
   readonly property var hostShell: suiteShell
+  readonly property var nativeSections: SuiteRuntime.HostContract.nativeSections
+  readonly property string trayDrawerDiagnostic: SuiteRuntime.HostContract.trayDrawerDiagnostic
+  function nativeDefaultSection(value) {
+    return SuiteRuntime.HostContract.nativeDefaultSection(value,
+      "barSections" in Commons.Util ? Commons.Util.barSections : undefined)
+  }
   readonly property var tokens: bar && "visualTokens" in bar
     && bar.visualTokens ? bar.visualTokens : hostTokens
   readonly property color widgetInk: tokens
@@ -56,15 +63,17 @@ Ui.Panel {
   readonly property int barSize: bar ? Number(bar.barSize || 0) : 0
   readonly property bool panelLoaded: panelLoader.item !== null
   readonly property var panelItem: panelLoader.item
-  readonly property bool v1TintedLauncherIconVisible:
-    v1TintedLauncherIcon.visible
+  readonly property bool v1TintedLauncherIconVisible: iconMode
+    && !stockOmarchyHost && launcherConfig.icon === "shibumi" && v1CustomFill
   readonly property bool animationActive: pointer.containsMouse
   readonly property var launcherStateConfig: stateService
     && stateService.requestedConfig ? stateService.requestedConfig
     : stateService && stateService.config ? stateService.config : ({})
   readonly property var launcherConfig: launcherStateConfig.launcher
     || ({ mode: "text", text: "shibumi", icon: "omarchy" })
-  readonly property bool iconMode: stockOmarchyHost
+  readonly property bool iconOnly: shellStyle === "shibumi"
+    && setting("displayMode", "full") === "icon-only"
+  readonly property bool iconMode: stockOmarchyHost || iconOnly
     || String(launcherConfig.mode || "text") === "icon"
   readonly property string effectiveLauncherText:
     String(launcherConfig.text || "shibumi")
@@ -262,12 +271,20 @@ Ui.Panel {
       registeredBar.unregisterClickTarget(root)
   }
 
-  NumberAnimation on phase {
-    from: 0
-    to: 2 * Math.PI
-    duration: 2600
-    loops: Animation.Infinite
+  Timer {
+    interval: 100
+    repeat: true
     running: root.animationActive
+    property double startedAt: 0
+    onRunningChanged: if (running) {
+      startedAt = Date.now()
+      root.phase = 0
+    }
+    onTriggered: {
+      // Retain the linear 2600 ms wave cycle at a low paint cadence.
+      const elapsed = Math.round((Date.now() - startedAt) / interval) * interval
+      root.phase = 2 * Math.PI * (elapsed % 2600) / 2600
+    }
   }
 
   RectangularShadow {
@@ -390,7 +407,8 @@ Ui.Panel {
       }
     }
 
-    Text {
+    Presentation.IconText {
+      barText: true
       visible: root.shibumiWordmark
       anchors.centerIn: parent
       text: "SHIBUMI"

@@ -4,6 +4,7 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/tests/lib/baselines.sh"
+source "$repo_root/tests/lib/host-diagnostics.sh"
 shibumi_load_omarchy_baseline
 omarchy_path=$OMARCHY_PATH
 python3 "$repo_root/tests/power-deferred-regression.py"
@@ -52,7 +53,7 @@ printf '%s\n' "$output"
 [[ $rc -eq 0 ]] || fail "component smoke exited $rc"
 grep -F 'power plugins smoke passed' <<<"$output" >/dev/null \
   || fail "success marker missing"
-if grep -Eq 'TypeError|ReferenceError|Binding loop|Unable to assign|Internal error|Cannot assign' <<<"$output"; then
+if grep -Eq "$HOST_DIAGNOSTICS_BINDING" <<<"$output"; then
   fail "component QML runtime error"
 fi
 
@@ -78,7 +79,7 @@ printf '%s\n' "$service_output"
 [[ $service_rc -eq 0 ]] || fail "power-state service smoke exited $service_rc"
 grep -F 'power service runtime smoke passed' <<<"$service_output" >/dev/null \
   || fail "power-state service success marker missing"
-if grep -Eq 'TypeError|ReferenceError|Binding loop|Unable to assign|Internal error|Cannot assign' <<<"$service_output"; then
+if grep -Eq "$HOST_DIAGNOSTICS_BINDING" <<<"$service_output"; then
   fail "service QML runtime error"
 fi
 [[ $(<"$tmpdir/power-state") == performance ]] \
@@ -105,7 +106,7 @@ for smoke in power-command power-runtime; do
   printf '%s\n' "$smoke_output"
   [[ $smoke_rc -eq 0 ]] || fail "$smoke exited $smoke_rc"
   grep -F "${smoke//-/ } smoke passed" <<<"$smoke_output" >/dev/null || fail "$smoke marker missing"
-  if grep -Eq 'TypeError|ReferenceError|Binding loop|Unable to assign|Internal error|Cannot assign' <<<"$smoke_output"; then
+  if grep -Eq "$HOST_DIAGNOSTICS_BINDING" <<<"$smoke_output"; then
     fail "$smoke QML runtime error"
   fi
 done
@@ -118,9 +119,10 @@ for plugin in battery power-profile; do
       "$repo_root/hancore.shibumi.$plugin" --glob '*.qml'; then
     fail "$plugin consumes transitional bar-owned feature state"
   fi
-  if rg -q 'Quickshell\.Services\.UPower|UPower\.|Process \{|Timer \{|FileView \{' \
+  if rg -q 'Quickshell\.Services\.UPower|UPower\.|Process \{|FileView \{' \
       "$repo_root/hancore.shibumi.$plugin" --glob '*.qml' \
-      --glob '!ShibumiPanel.qml'; then
+      --glob '!ShibumiPanel.qml' || \
+      rg -q 'Timer \{' "$repo_root/hancore.shibumi.$plugin" --glob '*.qml' --glob '!ShibumiPanel.qml' --glob '!WaterRing.qml' --glob '!BatteryRing.qml' --glob '!BarWidget.qml' || { [[ $plugin != battery ]] && rg -q 'Timer \{' "$widget"; }; then
     fail "$plugin presentation owns hardware state or background work"
   fi
 done
@@ -128,21 +130,27 @@ done
 rg -q 'bar\.run\("omarchy-launch-or-focus-tui btop"\)' \
   "$repo_root/hancore.shibumi.battery/BarWidget.qml" \
   || fail "battery system-monitor action bypasses the host facade"
-rg -q 'panel\.powerService\.profileLabel\(profileRow\.modelData\)' \
+rg -Fq 'model: panel.powerState.profiles' \
   "$repo_root/hancore.shibumi.power-profile/PowerProfilePanel.qml" \
-  || fail "power-profile view duplicates the shared profile model"
-for glyph in '\uF06C' '\uF24E' '\uF0E7'; do
+  || fail "power-profile view does not consume the shared profile model"
+for glyph in '"󰌪"' '"󰊚"' '"󰓅"'; do
   rg -Fq "$glyph" "$repo_root/hancore.shibumi.power-profile/PowerProfilePanel.qml" \
     || fail "power-profile panel icon drifted from V1: $glyph"
 done
 if rg -Fq 'rotation: -90' "$repo_root/hancore.shibumi.battery/BarWidget.qml"; then
   fail "battery bar gauge drifted from the horizontal V1 presentation"
 fi
+for pulse_site in hancore.shibumi.battery/BarWidget.qml hancore.shibumi.center/StatusIndicators.qml hancore.shibumi.control-center/BarWidget.qml; do
+  if rg -Fq 'Animation.Infinite' "$repo_root/$pulse_site"; then
+    fail "bar pulse must not animate per frame: $pulse_site"
+  fi
+done
 for charging_contract in \
-    'id: chargingBolt' \
-    'ctx.lineTo(width * 0.88, height * 0.45)' \
-    'visible: gauge.charging && !gauge.full' \
-    'clip: true'; do
+    ': batteryIcon(gauge.ratio * 100, gauge.charging, gauge.full)' \
+    'visible: gauge.horizontalCharging' \
+    'root.batteryOrientation === "horizontal" && (charging || full)' \
+    'opacity: low ? pulse : 1' \
+    'running: gauge.visible && gauge.low'; do
   rg -Fq "$charging_contract" "$repo_root/hancore.shibumi.battery/BarWidget.qml" \
     || fail "battery charging presentation drifted from V1: $charging_contract"
 done
@@ -156,7 +164,7 @@ rg -q 'function profileLabel\(profile\)' \
 rg -Fq 'commandFor("activeProfile", ["busctl", "--system", "get-property",' \
   "$repo_root/hancore.shibumi.power-state/Service.qml" \
   || fail "power-state service does not use the lightweight active-profile probe"
-rg -Fq 'onTriggered: root.refreshActiveProfile()' \
+rg -Fq 'function onProfileChanged() { root.refreshActiveProfile() }' \
   "$repo_root/hancore.shibumi.power-state/Service.qml" \
   || fail "power-state hot path still refreshes the complete profile list"
 rg -q 'readonly property string batteryId:' \
@@ -171,7 +179,7 @@ rg -Fq "printf 'health\\\\t%s\\\\n'" \
 rg -q 'panel\.powerState\.batteryHealthText' \
   "$repo_root/hancore.shibumi.battery/BatteryPanel.qml" \
   || fail "battery panel does not render the shared health fallback"
-rg -q 'width: parent \? parent\.width : 0' \
+rg -q 'width: primaryStats\.width' \
   "$repo_root/hancore.shibumi.battery/BatteryPanel.qml" \
   || fail "battery information rows can collapse to zero width"
 

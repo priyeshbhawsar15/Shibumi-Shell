@@ -2,6 +2,7 @@
 set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/tests/lib/baselines.sh"
+source "$repo_root/tests/lib/host-diagnostics.sh"
 shibumi_load_omarchy_baseline
 fixture=$(mktemp -d /tmp/sb-ghost.XXXXXXXX)
 trap 'rm -rf -- "$fixture"' EXIT
@@ -28,7 +29,8 @@ for scale in 1 1.5; do
       exit 1
     }
   grep -q 'drag ghost render regression passed' "$fixture/runtime.log"
-  if grep -Eq 'Binding loop|TypeError|ReferenceError|WARN|ERROR' "$fixture/runtime.log"; then
+  if grep -E 'Binding loop|TypeError|ReferenceError|WARN|ERROR' "$fixture/runtime.log" \
+      | host_filter_startup_diagnostics >/dev/null; then
     tail -60 "$fixture/runtime.log" >&2
     exit 1
   fi

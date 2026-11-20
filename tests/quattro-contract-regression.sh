@@ -104,7 +104,7 @@ for needle in \
 done
 
 case $SHIBUMI_OMARCHY_SOURCE_REVISION in
-  0534987009061cbe2dacdde4ad564092ab698d12)
+  0534987009061cbe2dacdde4ad564092ab698d12|c668141e9c42b13c80c9ca4ea108e11708c5e8a5|94a8fbc2d67eec5673c7f16b8c5e8a9c8452ffdc|237f1b4071a0bff2296c6d740ba2b9fd695ebfa0|50d687a1f27063513cf42e6f33c3a4fcb17c24ed|e71a816e9032f040225e086c7256f73e8080ae45|4c1b4cb3a94447aff39af98e2fcc0490a9fb32e7|246f33a2fef66411c990860d88e0823ae83987fc|0d8edf3812e0caafd155760c96bc2862933f611a|76e11b4f4c031cc9c5291dd5c7115eb2815b765f|ac2690cd7be4f47e4a255f5e2e78d904d436b068|84b3f2872b5023c13967543ed4a98b08fcac5b21|8e33e7233c01bf3b563b344bffc790a5d2dd98ea|f428bb4fe4d2e688fa05190b7d3c61430805b601|551dc62969046709e7c6176dbdbccacce580a487)
     for needle in \
       'target.shell = shell.pluginShellFor(manifest)' \
       'target.manifest = shell.publicPluginManifest(manifest)' \
@@ -114,7 +114,7 @@ case $SHIBUMI_OMARCHY_SOURCE_REVISION in
       'function publicPluginManifest(manifest)' \
       'function publicBarWidgetSnapshot()'; do
       rg -Fq "$needle" "$shell_root" \
-        || fail "scoped 4.0.3 shell contract drift: $needle"
+        || fail "scoped host shell contract drift: $needle"
     done
     for legacy_assignment in \
       'if ("shell" in target) target.shell = shell' \
@@ -123,7 +123,7 @@ case $SHIBUMI_OMARCHY_SOURCE_REVISION in
       'if ("pluginRegistry" in target) target.pluginRegistry = shell.pluginRegistry' \
       'if ("barConfig" in target) target.barConfig = shell.barConfig'; do
       if rg -Fxq "    $legacy_assignment" "$shell_root"; then
-        fail "4.0.3 shell restored raw host injection: $legacy_assignment"
+        fail "scoped host shell restored raw host injection: $legacy_assignment"
       fi
     done
     ;;
@@ -153,6 +153,32 @@ for needle in \
     || fail "KeyboardPanel compatibility surface drift: $needle"
 done
 
+# Bind one constant-only compatibility layer to the already pinned host tree.
+python3 - "$repo_root" "$omarchy_path" <<'PY'
+import json, re, sys
+from pathlib import Path
+suite, native = map(Path, sys.argv[1:])
+contract = (suite / "hancore.shibumi.state/runtime/HostContract.qml").read_text()
+values = {}
+for key, expression in re.findall(r'readonly property string (\w+): ([^\n]+)', contract):
+    parts = [part.strip() for part in expression.split("+")]
+    values[key] = "".join(json.loads(p) if p.startswith('"') else values[p] for p in parts)
+services = json.loads(re.search(r'firstPartyServices:\s*(\[[^\]]+\])', contract)[1])
+targets = re.findall(r'"([^"]+)"', re.search(r'ipcTargets:\s*\(\{(.*?)\}\)', contract, re.S)[1])
+assert len(services) == 3 and len(targets) == 4, "incomplete HostContract identities"
+ids = {json.loads(p.read_text()).get("id") for p in (native / "shell/plugins").rglob("*manifest.json")}
+assert set(services) <= ids, f"host first-party IDs missing: {set(services) - ids}"
+qml = "\n".join(p.read_text() for p in sorted((native / "shell").rglob("*.qml")))
+for target in targets:
+    route = r'\b(?:target|ipcTarget)\s*:\s*"' + re.escape(target) + '"'
+    assert re.search(route, qml), f"host IPC identity missing: {target}"
+commands = "\n".join(p.read_text(errors="replace") for p in sorted((native / "bin").glob("omarchy-*")) if p.is_file())
+for key in ("stateRoot", "togglesDir", "themeDir", "themeColorsFile", "themeNameFile", "barOffMarker"):
+    assert re.search(r'(?:\$HOME/|~/|"/)' + re.escape(values[key]) + r'(?=["\s]|$)', commands + qml), f"host path missing: {key}={values[key]}"
+# barHiddenMarker is a suite-side legacy alias, not a claimed host path.
+print("HostContract source binding passed: first-party IDs, IPC routes, host marker/theme paths")
+PY
+
 omarchy_version=unknown
 for package_name in omarchy omarchy-dev; do
   if package_version=$(pacman -Q "$package_name" 2>/dev/null | awk '{print $2}'); then
@@ -161,5 +187,6 @@ for package_name in omarchy omarchy-dev; do
   fi
 done
 
-printf 'Quattro contract regression passed (%s, %d plugins)\n' \
+printf 'Quattro contract regression passed (source=%s revision=%s; local package=%s; %d plugins)\n' \
+  "$SHIBUMI_OMARCHY_BASELINE_ID" "$SHIBUMI_OMARCHY_SOURCE_REVISION" \
   "$omarchy_version" "${#plugin_ids[@]}"

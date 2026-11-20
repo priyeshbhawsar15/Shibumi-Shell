@@ -50,11 +50,11 @@ ShellRoot {
   Shared.Provider {
     id: stateProvider
     pluginId: "hancore.shibumi.state"
-    implementationVersion: "0.1.1-beta.14.1"
+    implementationVersion: "0.2.5"
     owner: stateOwner
     host: stateHost
     manifest: ({ id: "hancore.shibumi.state",
-      version: "0.1.1-beta.14.1", kinds: ["service"] })
+      version: "0.2.5", kinds: ["service"] })
   }
 
   QtObject {
@@ -77,11 +77,11 @@ ShellRoot {
       }
       Shared.Provider {
         pluginId: "hancore.shibumi.bar"
-        implementationVersion: "0.1.1-beta.14.1"
+        implementationVersion: "0.2.5"
         owner: owner
         host: owner.providerHost
         manifest: ({ id: "hancore.shibumi.bar",
-          version: "0.1.1-beta.14.1", kinds: ["bar"] })
+          version: "0.2.5", kinds: ["bar"] })
       }
     }
   }
@@ -107,6 +107,7 @@ ShellRoot {
   }
 
   IpcHandler {
+    enabled: root.mode !== "reload"
     target: "shell"
     function rescanPlugins(): void {
       if (root.mode === "refusal") {
@@ -126,10 +127,20 @@ ShellRoot {
     }
   }
 
+  IpcHandler {
+    enabled: root.mode === "reload"
+    target: "shell"
+    function rescanPlugins(): void { root.rescanCalls++ }
+    function reloadPlugins(): void {
+      root.rescanCalls++
+      replacementTimer.restart()
+    }
+  }
+
   Component.onCompleted: {
     if (["success", "refusal", "timeout", "owner-change",
          "process-change", "scope-loss", "diagnostic", "early-deadline",
-         "late-replacement"].indexOf(mode) < 0)
+         "late-replacement", "reload"].indexOf(mode) < 0)
       fail("invalid SHIBUMI_PRIME_MODE")
     // The early deadline needs a budget it cannot really exhaust before the
     // replacement arrives, including the IPC client's own startup time.
@@ -189,7 +200,7 @@ ShellRoot {
       if (root.mode === "late-replacement" && root.stage === 2) return
 
       const primeSucceeds = ["success", "owner-change", "process-change",
-        "diagnostic", "early-deadline", "late-replacement"].indexOf(root.mode) >= 0
+        "diagnostic", "early-deadline", "late-replacement", "reload"].indexOf(root.mode) >= 0
       if (primeSucceeds) {
         if (root.stage === 5) {
           if (!root.replacementBar

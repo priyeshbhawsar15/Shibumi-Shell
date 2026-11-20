@@ -75,15 +75,12 @@ ShibumiPanel {
         width: parent.width
         height: Commons.Style.space(28)
 
-        Text {
+        Presentation.PanelHeading {
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
           text: "Updates"
           color: panel.controlForeground
           font.family: panel.fontFamily
-          font.pixelSize: Commons.Style.font.heading
-          font.weight: Font.Medium
-          font.letterSpacing: 2
         }
 
         Row {
@@ -105,8 +102,8 @@ ShibumiPanel {
             hoverTextColor: panel.controlMutedHigh
             hoverBorderColor: panel.controlHoverBorderColor
             tooltipText: selected
-              ? "Package count is shown in the badge"
-              : "Package count is hidden from the badge"
+              ? "Package count is shown in the bar"
+              : "Package count is hidden from the bar"
             onClicked: panel.setBadgePreference(
               "packageBadge", !panel.packageBadgeEnabled)
           }
@@ -124,8 +121,8 @@ ShibumiPanel {
             hoverTextColor: panel.controlMutedHigh
             hoverBorderColor: panel.controlHoverBorderColor
             tooltipText: selected
-              ? "Theme count is shown in the badge"
-              : "Theme count is hidden from the badge"
+              ? "Theme count is shown in the bar"
+              : "Theme count is hidden from the bar"
             onClicked: panel.setBadgePreference(
               "themeBadge", !panel.themeBadgeEnabled)
           }

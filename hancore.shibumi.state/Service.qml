@@ -16,7 +16,7 @@ Item {
   SuiteRuntime.Provider {
     id: runtimeProvider
     pluginId: "hancore.shibumi.state"
-    implementationVersion: "0.1.1-beta.14.1"
+    implementationVersion: "0.2.5"
     owner: root
     host: root.shell
     manifest: root.manifest
@@ -97,6 +97,9 @@ Item {
     const next = JSON.parse(JSON.stringify(current))
     if (mutator(next) === false || !StorageModel.finiteNumbers(next)) return false
     const normalized = ShibumiConfig.normalize(next)
+    // Enabling a displaced fixed group requires an atomic placement as well.
+    if ((normalized.order.parked || []).some(group =>
+        groupEnabledForVariantFrom(normalized, group, "v1"))) return false
     if (same(current, normalized)) return false
 
     // A queued request is not a completed save. Publication and settled status
@@ -131,7 +134,7 @@ Item {
     "displayMode", "compact", "mediaStyle", "color", "colorMode", "tone",
     "widgetBorder", "widgetBorderWidth",
     "widgetBorderColor", "widgetBorderUsesSurfaceColor", "widgetPadding",
-    "widgetRadius", "surfaceOpacity"
+    "widgetRadius", "surfaceOpacity", "batteryOrientation"
   ]
   readonly property var v1ExtensionAppearanceGroupIds: [
     "G:hancore.shibumi.temperature",
@@ -152,7 +155,8 @@ Item {
       color: "inherit", colorMode: "fill", tone: "auto",
       widgetBorder: false, widgetBorderWidth: 1,
       widgetBorderColor: "inherit", widgetBorderUsesSurfaceColor: false,
-      widgetPadding: "auto", widgetRadius: "auto", surfaceOpacity: 1
+      widgetPadding: "auto", widgetRadius: "auto", surfaceOpacity: 1,
+      batteryOrientation: "horizontal"
     }
   }
 
@@ -178,6 +182,8 @@ Item {
     const mode = String(value || "full")
     if (variant === "v2")
       return ["full", "icon", "text"].indexOf(mode) >= 0 ? mode : "full"
+    if (/^G([1-9]|1[0-5])$/.test(group) && mode === "icon-only")
+      return "icon-only"
     const compactGroups = [
       "G4", "G5", "G6", "G11", "G12", "G13", "G14", "G15", "G18",
       "G:hancore.shibumi.storage"
@@ -331,6 +337,8 @@ Item {
       normalizedValue = value === true
     else if (name === "mediaStyle")
       normalizedValue = String(value || "") === "full" ? "full" : "default"
+    else if (name === "batteryOrientation")
+      normalizedValue = value === "vertical" ? "vertical" : "horizontal"
 
     return commit(function(next) {
       if (!ShibumiConfig.isPlainObject(next.widgets)) next.widgets = {}
@@ -359,7 +367,7 @@ Item {
       "displayMode", "compact", "mediaStyle", "color", "colorMode", "tone",
       "widgetBorder", "widgetBorderWidth",
       "widgetBorderColor", "widgetBorderUsesSurfaceColor", "widgetPadding",
-      "widgetRadius", "surfaceOpacity"
+      "widgetRadius", "surfaceOpacity", "batteryOrientation"
     ]
     return commit(function(next) {
       if (!ShibumiConfig.isPlainObject(next.widgets)) next.widgets = {}
@@ -649,26 +657,6 @@ Item {
     return commit(function(next) { next.reactor = { mode: mode } })
   }
 
-  function setOrder(value) {
-    const normalized = ShibumiConfig.normalizedOrder(value)
-    const splits = normalized
-      ? ShibumiConfig.normalizedSplits(storage.draft().splits, normalized) : null
-    if (!normalized || !splits) return false
-    return commit(function(next) {
-      next.order = normalized
-      next.v1SlotRoles = ShibumiConfig.slotRolesForOrder(normalized)
-      next.splits = splits
-    })
-  }
-
-  function setSplits(value) {
-    const order = ShibumiConfig.normalizedOrder(storage.draft().order)
-    const normalized = order
-      ? ShibumiConfig.normalizedSplits(value, order) : null
-    if (!normalized) return false
-    return commit(function(next) { next.splits = normalized })
-  }
-
   // A transition writes all affected State fields in one existing own-entry
   // request. The caller still waits for persistenceSettled before native work.
   function exactKeys(value, keys) {
@@ -679,7 +667,10 @@ Item {
 
   function transitionLayout(value, variant) {
     const regions = ["left", "center", "right"]
-    if (!exactKeys(value, regions) || !regions.every(region =>
+    const keys = variant === "v1" && value
+      && Object.prototype.hasOwnProperty.call(value, "parked")
+      ? regions.concat(["parked"]) : regions
+    if (!exactKeys(value, keys) || !keys.every(region =>
         Array.isArray(value[region]) && value[region].every(id => typeof id === "string"))) return null
     return variant === "v1" ? ShibumiConfig.normalizedOrder(value)
       : ShibumiConfig.normalizedV2Layout(value)
@@ -696,7 +687,9 @@ Item {
       if (key === "v1Layout") {
         if (!exactKeys(value, ["order", "splits"])) return null
         const order = transitionLayout(value.order, "v1")
-        if (!order || !exactKeys(value.splits, ["left", "right", "boundaries"])) return null
+        const legacySplits = exactKeys(value.splits, ["left", "right", "boundaries"])
+        if (!order || (!legacySplits
+            && !exactKeys(value.splits, ["left", "center", "right", "boundaries"]))) return null
         const splits = ShibumiConfig.normalizedSplits(value.splits, order)
         if (!splits) return null
         result[key] = {order: order, splits: splits}

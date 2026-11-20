@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Window
 import qs.Commons as Commons
 import "../../core" as Core
 import "../../core/RunGeometry.js" as RunGeometry
@@ -147,7 +148,21 @@ Item {
         : width
       readonly property real responsiveCapacity: compactShell
         ? Math.max(0, width - 2 * frameInset) : shellWidth
-      readonly property real shellX: shibumiShell ? frameInset
+      readonly property real spacingRecovery: leftGroups.spacingRecovery
+        + centerGroups.spacingRecovery + rightGroups.spacingRecovery
+      readonly property real pixelRatio: root.Window.window
+        ? root.Window.window.devicePixelRatio : 1
+      readonly property real expandedShellWidth: compactShell
+        ? Math.min(width - 2 * frameInset, shellWidth + spacingRecovery) : shellWidth
+      readonly property real expandedShellX: shibumiShell ? frameInset
+        : compactShell ? Math.round((width - expandedShellWidth) * pixelRatio / 2) / pixelRatio
+        : Math.round((width - expandedShellWidth) / 2)
+      // Keep compact origins on the device grid; recover width, not outer padding.
+      readonly property real shellX: compactShell && spacingRecovery > 0
+        ? expandedShellX + Math.round((expandedShellWidth - shellWidth)
+            * pixelRatio / 2) / pixelRatio
+        : shibumiShell ? frameInset
+        : compactShell ? Math.round((width - shellWidth) * pixelRatio / 2) / pixelRatio
         : Math.round((width - shellWidth) / 2)
       readonly property real shellContentInset: contentInset
         + (shellStyle === "notch"
@@ -167,8 +182,15 @@ Item {
         : ResponsiveLayout.centerAvailableWidth(compactShell, width,
           frameInset, shellContentInset, leftRegion.width, rightRegion.width,
           centerGap, measuredCenterSpan, centerExtras.width)
+      // Read by responsive decisions without advancing positioned geometry
+      // or the legacy budget's notification/animation path.
+      readonly property real currentCenterAvailableWidth: compactShell
+        ? centerAvailableWidth : Math.max(0,
+          responsiveCapacity - 2 * shellContentInset
+          - leftGroups.width - leftExtras.width
+          - rightExtras.width - rightGroups.width - 2 * centerGap
+          - centerExtras.width)
       property int narrowStage: 0
-      readonly property real sideMargin: shellX + shellContentInset
       readonly property real responsiveSideInset: shellContentInset
       readonly property real centerFloorWidth: Math.max(80,
         Number(centerGroups.minimumResponsiveWidth) || 0)
@@ -196,11 +218,30 @@ Item {
       readonly property real idealCenterX: Math.round((width - centerRegion.width) / 2)
       readonly property real minCenterX: Math.round(leftRegion.x + leftRegion.width + centerGap)
       readonly property real maxCenterX: Math.round(rightRegion.x - centerGap - centerRegion.width)
-      readonly property real centerTargetX: maxCenterX < minCenterX
+      readonly property real logicalCenterTargetX: maxCenterX < minCenterX
+        // At an exact fit, pixel rounding can make the two legal limits cross
+        // by one pixel. Falling back to the screen center then overlaps the
+        // asymmetric right run (notably G8 with G9/MPRIS). Split the tiny
+        // deficit between both sides instead and preserve the visible gaps.
         ? Math.round((minCenterX + maxCenterX) / 2)
         : Math.max(minCenterX, Math.min(idealCenterX, maxCenterX))
+      readonly property real expandedCenterTargetX: {
+        const centerWidth = centerRegion.width + centerGroups.spacingRecovery
+        const ideal = Math.round((width - centerWidth) / 2)
+        const minimum = Math.round(expandedShellX + shellContentInset
+          + leftRegion.width + leftGroups.spacingRecovery + centerGap)
+        const maximum = Math.round(width - expandedShellX - shellContentInset
+          - rightRegion.width - rightGroups.spacingRecovery - centerGap - centerWidth)
+        return maximum < minimum ? Math.round((minimum + maximum) / 2)
+          : Math.max(minimum, Math.min(ideal, maximum))
+      }
+      readonly property real centerTargetX: (shibumiShell || compactShell) && spacingRecovery > 0
+        ? expandedCenterTargetX + Math.round((logicalCenterTargetX
+            - expandedCenterTargetX) * pixelRatio) / pixelRatio
+        : logicalCenterTargetX
       readonly property var runs: {
         void(leftGroups.groupGeometry)
+        void(centerGroups.groupGeometry)
         void(rightGroups.groupGeometry)
         void(leftRegion.x)
         void(leftRegion.width)
@@ -218,6 +259,11 @@ Item {
               x: leftRegion.x + leftGroups.x - runChrome.x,
               groups: leftGroups.groupGeometry,
               splits: root.bar.layoutController.splits.left
+            },
+            {
+              x: centerRegion.x + centerGroups.x - runChrome.x,
+              groups: centerGroups.groupGeometry,
+              splits: root.bar.layoutController.splits.center
             },
             {
               x: rightRegion.x + rightGroups.x - runChrome.x,
@@ -314,10 +360,14 @@ Item {
       }
 
       Rectangle {
+        objectName: "shibumi-editing-frame"
         x: runChrome.x - Commons.Style.space(3)
-        y: runChrome.y - Commons.Style.space(3)
+        y: root.bar.layoutController.v2Mode
+          ? runChrome.y - Commons.Style.space(3) : border.width
         width: runChrome.width + Commons.Style.space(6)
-        height: runChrome.height + Commons.Style.space(6)
+        height: root.bar.layoutController.v2Mode
+          ? runChrome.height + Commons.Style.space(6)
+          : Math.max(0, parent.height - 2 * border.width)
         visible: root.layoutSession && root.layoutSession.editing
         color: "transparent"
         border.width: 1
@@ -453,6 +503,9 @@ Item {
           layoutSession: root.layoutSession
           visibilityStage: horizontalSurface.narrowStage
           availableWidth: Math.max(1, horizontalSurface.centerAvailableWidth)
+          restageAvailableWidth: Math.max(1, horizontalSurface.currentCenterAvailableWidth)
+          layoutBusy: leftGroups.savingsPending || centerGroups.savingsPending
+            || rightGroups.savingsPending
         }
 
         Core.BarSection {

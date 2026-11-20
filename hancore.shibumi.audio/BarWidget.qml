@@ -13,10 +13,11 @@ Ui.Panel {
   manageIpc: false
   Presentation.HostTokens { id: hostTokens; bar: root.bar; serviceShell: suiteShell }
   property url popupSource: Qt.resolvedUrl("AudioPanel.qml")
-  readonly property url backendPanelSource: registeredSource("omarchy.audio")
-  property Component panelComponent: !audioServiceResolved
+  HostWidgetEmbed { id: embed; bar: root.bar }
+  readonly property url backendPanelSource: embed.resolveSource("omarchy.audio")
+  property var panelComponent: !audioServiceResolved
     || nativeBackendAccessEnabled ? null
-    : String(backendPanelSource) ? null : registeredComponent("omarchy.audio")
+    : String(backendPanelSource) ? null : embed.resolveComponent("", "omarchy.audio")
   property var backendReadyOverride: null
   SuiteRuntime.HostShell { id: suiteShell; host: root.bar ? root.bar.shell : null }
   property var leasedReportService: null
@@ -39,11 +40,13 @@ Ui.Panel {
       bar ? bar.urgent : Commons.Color.accent)
     : (bar ? bar.urgent : Commons.Color.accent)
   readonly property var audioStateService: suiteShell.serviceFor("hancore.shibumi.audio")
-  readonly property string displayMode: String(
+  readonly property bool iconOnly: tokens.v2Shell !== true
+    && setting("displayMode", "full") === "icon-only"
+  readonly property string displayMode: iconOnly ? "icon" : String(
     setting("displayMode", setting("compact", false) ? "icon" : "full"))
   readonly property bool compact: displayMode === "icon"
-  readonly property bool horizontalValueVisible: displayMode !== "icon"
-    || tokens.v2Shell !== true
+  readonly property bool horizontalValueVisible: !iconOnly
+    && (displayMode !== "icon" || tokens.v2Shell !== true)
   readonly property var panelItem: popupLoader.item
   readonly property bool panelLoaded: panelItem !== null
   readonly property bool audioReady: audioBridge.ready
@@ -69,27 +72,6 @@ Ui.Panel {
   function setting(name, fallback) {
     const value = settings ? settings[name] : undefined
     return value === undefined || value === null ? fallback : value
-  }
-
-  function registeredComponent(id) {
-    if (bar && typeof bar.registeredWidgetComponent === "function")
-      return bar.registeredWidgetComponent(id)
-    const registry = bar ? bar.barWidgetRegistry : null
-    if (registry) void(registry.revision)
-    const widgets = registry && registry.widgets ? registry.widgets : ({})
-    const entry = widgets[id]
-    return entry ? entry.component : null
-  }
-
-  function registeredSource(id) {
-    if (bar && typeof bar.registeredWidgetSource === "function")
-      return bar.registeredWidgetSource(id)
-    const registry = bar && bar.shell
-      && "pluginRegistry" in bar.shell ? bar.shell.pluginRegistry : null
-    const pluginManifest = registry && registry.installedPlugins
-      ? registry.installedPlugins[String(id || "")] : null
-    return registry && typeof registry.entryPointUrl === "function"
-      ? registry.entryPointUrl(pluginManifest, "barWidget") : ""
   }
 
   function officialSettings() {
@@ -229,6 +211,7 @@ Ui.Panel {
   Connections {
     target: audioBridge
     function onOutputVolumeChanged() {
+      if (!root) return
       if (!root.wheelAdjustmentPending || !root.wheelCommitInFlight
           || root.wheelInFlightSerial !== root.wheelCommitSerial)
         return
@@ -309,7 +292,8 @@ Ui.Panel {
     Row {
       spacing: root.tokens.contentGap
 
-      Text {
+      Presentation.IconText {
+        barText: true
         visible: root.displayMode === "full"
         anchors.verticalCenter: parent.verticalCenter
         text: "VOL"
@@ -353,7 +337,9 @@ Ui.Panel {
         }
       }
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
+        nativeText: outputIcon(root.displayedOutputVolume, root.muted, root.audioReady)
+        optical: !root.bar || !root.bar.vertical
         visible: root.displayMode === "icon"
         anchors.verticalCenter: parent.verticalCenter
         text: "graphic_eq"
@@ -364,7 +350,8 @@ Ui.Panel {
         fill: 1
       }
 
-      Text {
+      Presentation.IconText {
+        barText: true
         visible: root.displayMode !== "icon"
         anchors.verticalCenter: parent.verticalCenter
         width: Commons.Style.space(30)
@@ -384,10 +371,13 @@ Ui.Panel {
   Component {
     id: compactHorizontalContent
 
-    Row {
+    Presentation.InkRow {
+      optical: root.tokens.v2Shell === true
       spacing: root.tokens.compactGap
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
+        nativeText: outputIcon(root.displayedOutputVolume, root.muted, root.audioReady)
+        optical: !root.bar || !root.bar.vertical
         visible: root.displayMode !== "text"
         anchors.verticalCenter: parent.verticalCenter
         text: "graphic_eq"
@@ -398,7 +388,8 @@ Ui.Panel {
         fill: 1
       }
 
-      Text {
+      Presentation.IconText {
+        barText: true
         visible: root.horizontalValueVisible
         anchors.verticalCenter: parent.verticalCenter
         width: Commons.Style.space(30)
@@ -421,7 +412,8 @@ Ui.Panel {
     Column {
       spacing: Commons.Style.space(2)
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
+        nativeText: outputIcon(root.displayedOutputVolume, root.muted, root.audioReady)
         anchors.horizontalCenter: parent.horizontalCenter
         text: "graphic_eq"
         color: root.widgetInk
@@ -431,6 +423,7 @@ Ui.Panel {
       }
 
       Text {
+        visible: !root.iconOnly
         anchors.horizontalCenter: parent.horizontalCenter
         text: String(root.volume).padStart(2, "0") + "%"
         color: root.widgetInk

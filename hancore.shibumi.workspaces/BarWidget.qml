@@ -1,7 +1,9 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQuick.Window
 import QtQuick.Shapes
+import Quickshell
 import qs.Commons as Commons
 import qs.Ui as Ui
 import "../hancore.shibumi.state/runtime" as SuiteRuntime
@@ -14,6 +16,10 @@ Ui.Panel {
   manageIpc: false
   Presentation.HostTokens { id: hostTokens; bar: root.bar; serviceShell: suiteShell }
   SuiteRuntime.HostShell { id: suiteShell; host: root.bar ? root.bar.shell : null }
+  // Preserve the eager renderer's initial logical width while WidgetSlot
+  // injects its host. Paint creation must not choose another width history.
+  property string initialRenderStyle: renderStyle
+  property bool paintReady: false
   property url panelSource: Qt.resolvedUrl("WorkspacePanel.qml")
   property var workspaceService: suiteShell.serviceFor("hancore.shibumi.workspaces")
   readonly property var stateService: suiteShell.serviceFor("hancore.shibumi.state")
@@ -24,16 +30,26 @@ Ui.Panel {
     ? tokens.widgetContentColor(settings,
       bar ? bar.urgent : Commons.Color.accent)
     : (bar ? bar.urgent : Commons.Color.accent)
-  readonly property var workspaceIds: workspaceService
-    ? workspaceService.visibleWorkspaceIds : []
+  readonly property bool perMonitorWorkspaces: workspaceService
+    && workspaceService.perMonitorWorkspaces === true
+  readonly property var monitor: perMonitorWorkspaces
+    ? workspaceService.monitorFor(root.QsWindow.window ? root.QsWindow.window.screen : null) : null
+  readonly property string monitorName: monitor ? monitor.name : ""
+  readonly property int monitorBlock: perMonitorWorkspaces
+    ? workspaceService.blockForMonitor(monitor) : 0
+  readonly property var workspaceIds: !workspaceService ? [] : perMonitorWorkspaces
+    ? workspaceService.workspaceIdsForMonitor(monitor) : workspaceService.visibleWorkspaceIds
   readonly property string displayMode: String(
     setting("displayMode", setting("compact", false) ? "icon" : "full"))
+  readonly property bool iconOnly: tokens.v2Shell !== true
+    && displayMode === "icon-only"
   readonly property bool compact: displayMode === "icon"
   readonly property string workspaceStyle: workspaceService
     ? workspaceService.style : "default"
   readonly property bool v2Mode: bar && bar.layoutController
     ? bar.layoutController.v2Mode === true : false
-  readonly property string renderStyle: displayMode === "icon" ? "rings"
+  readonly property string renderStyle: iconOnly ? "default"
+    : displayMode === "icon" ? "rings"
     : displayMode === "text" ? "numbers" : workspaceStyle
   // V1 keeps the original QS Rise radius contract. The later V2 renderer has
   // fixed marker geometry and must not inherit the V1 Radius 12/6 setting.
@@ -48,7 +64,7 @@ Ui.Panel {
       && tokens.presentation.radius === "small"
         ? Commons.Style.space(6) : Commons.Style.space(9)
   readonly property var displayedWorkspaceIds: {
-    if (displayMode === "full") return workspaceIds
+    if (displayMode === "full" || iconOnly) return workspaceIds
     for (var index = 0; index < workspaceIds.length; index++) {
       if (workspaceState(workspaceIds[index]).focused)
         return [workspaceIds[index]]
@@ -84,6 +100,11 @@ Ui.Panel {
       ? tokens.seal : widgetInk)
   readonly property color pacmanOccupiedColor: widgetInk
   readonly property color pacmanEmptyColor: widgetInk
+  readonly property color workspaceHoverColor: ((tokens
+    && typeof tokens.widgetHasFill === "function" && tokens.widgetHasFill(settings))
+    || Qt.colorEqual(paletteColor("color03", widgetInk), widgetInk))
+      ? Qt.rgba(widgetInk.r, widgetInk.g, widgetInk.b, 0.72)
+      : paletteColor("color03", widgetInk)
   readonly property color pacmanHoverColor: widgetInk
   property int pacmanLastFocusedWorkspaceId: -1
   property int pacmanTargetWorkspaceId: -1
@@ -110,7 +131,13 @@ Ui.Panel {
     return focusedDisplayIndex >= 0
       ? workspaceRepeater.itemAt(focusedDisplayIndex) : null
   }
+  // Row publishes the combined width at layout, after the cells have advanced
+  // together. Summing each animated width in a binding exposes intermediate
+  // grow/shrink values and needlessly relayouts the entire bar twice per tick.
   readonly property real workspaceContentWidth: {
+    if (root.Window.window) return workspaceRow.implicitWidth
+    // Detached components have no scene-graph polish to update a positioner.
+    // Preserve their logical geometry until they are attached to a window.
     void(displayedWorkspaceIds)
     void(renderStyle)
     var total = 0
@@ -129,8 +156,28 @@ Ui.Panel {
   implicitHeight: !visible ? 0 : bar && bar.vertical
     ? workspaceSurface.implicitHeight : bar ? bar.barSize : 28
 
+  // The three width-animated paints are centered in untransformed cell
+  // containers. Share the module-to-scene mapping instead of walking the same
+  // ancestors separately for every marker on every width-animation frame.
+  function markerShiftX(cell, x) {
+    const left = workspaceRow.x + cell.x + x
+    return surfaceInk.snapX(left) - left
+  }
+
+  function markerShiftY(y, height) {
+    return surfaceInk.rectangleY(height) - workspaceRow.y - y
+  }
+
   function activateWorkspace(id) {
-    return workspaceService ? workspaceService.focusWorkspace(id) : false
+    if (!workspaceService) return false
+    if (perMonitorWorkspaces && monitorName !== ""
+        && workspaceService.blockOf(id) === monitorBlock)
+      return workspaceService.focusSlot(workspaceService.slotOf(id), monitorName)
+    return workspaceService.focusWorkspace(id)
+  }
+
+  function workspaceLabel(id) {
+    return perMonitorWorkspaces ? workspaceService.slotOf(id) : id
   }
 
   function paletteColor(id, fallback) {
@@ -223,16 +270,18 @@ Ui.Panel {
   }
 
   function workspaceState(id) {
-    return workspaceService
-      ? workspaceService.workspaceState(id)
+    const info = workspaceService ? workspaceService.workspaceState(id)
       : ({ id: Number(id) || 0, focused: false, occupied: false, windowCount: 0 })
+    if (!perMonitorWorkspaces) return info
+    return {id: info.id, focused: !!monitor && info.id === monitor.activeId,
+      occupied: info.occupied, windowCount: info.windowCount}
   }
 
   function workspaceTooltip(id) {
     const info = workspaceState(id)
     const windows = info.windowCount === 1 ? "1 window"
       : info.windowCount + " windows"
-    return "Workspace " + info.id + " · " + windows
+    return "Workspace " + workspaceLabel(info.id) + " · " + windows
       + " · Right-click for workspace panel"
   }
 
@@ -257,11 +306,17 @@ Ui.Panel {
   }
   onOpenedChanged: syncPanelLoader()
   onFocusedWorkspaceIdChanged: observePacmanFocus()
-  onRenderStyleChanged: resetPacmanTravel()
-  Component.onCompleted: pacmanLastFocusedWorkspaceId = focusedWorkspaceId
+  onRenderStyleChanged: { frameMotion.placed = false; resetPacmanTravel() }
+  onFrameTargetChanged: if (!frameTarget) frameMotion.placed = false
+  Component.onCompleted: {
+    initialRenderStyle = renderStyle
+    pacmanLastFocusedWorkspaceId = focusedWorkspaceId
+    Qt.callLater(function() { root.paintReady = true })
+  }
 
   Item {
     id: workspaceSurface
+    Presentation.BarInk { id: surfaceInk; target: workspaceSurface }
     anchors.centerIn: parent
     implicitWidth: root.workspaceContentWidth + 2 * root.workspacePadding
     implicitHeight: root.bar ? root.bar.barSize : Commons.Style.space(28)
@@ -292,19 +347,37 @@ Ui.Panel {
 
     Item {
       id: frameMotion
+      property bool placed: false
       z: 0
       visible: root.renderStyle === "rings" && root.frameTarget !== null
+      // Use resident animated cell geometry and the logical frame size.
       x: workspaceRow.x + (root.frameTarget ? root.frameTarget.x : 0)
-        + (root.frameTarget ? (root.frameTarget.width - width) / 2 : 0)
+        + (root.frameTarget ? (root.frameTarget.implicitWidth
+          - Commons.Style.space(18)) / 2 : 0)
       anchors.verticalCenter: parent.verticalCenter
       width: Commons.Style.space(18)
       height: width
+      onXChanged: {
+        if (placed || root.renderStyle !== "rings" || !root.frameTarget) return
+        const cells = Array.from(workspaceRow.children)
+          .filter(item => item.visible && item.implicitWidth > 0)
+        if (cells.length === root.displayedWorkspaceIds.length
+            && cells.every((item, index) =>
+              Math.abs(item.implicitWidth - Commons.Style.space(20)) < 1e-7
+              && Math.abs(item.width - item.implicitWidth) < 1e-7
+              && Math.abs(item.x - index * (item.width + workspaceRow.spacing)) < 1e-7))
+          placed = true
+      }
 
       Behavior on x {
+        enabled: frameMotion.placed
         NumberAnimation { duration: 190; easing.type: Easing.OutCubic }
       }
 
-      Shape {
+      Loader {
+        anchors.fill: parent
+        active: root.renderStyle === "rings"
+        sourceComponent: Component { Shape {
         id: frameShape
         anchors.fill: parent
         antialiasing: true
@@ -357,6 +430,8 @@ Ui.Panel {
             controlY: 0.5
           }
         }
+        }
+      }
       }
     }
 
@@ -365,7 +440,13 @@ Ui.Panel {
       z: 1
       anchors.centerIn: parent
       spacing: root.workspaceGap
-      width: root.workspaceContentWidth
+      width: root.Window.window ? implicitWidth : root.workspaceContentWidth
+      onPositioningComplete: {
+        if (root.renderStyle === "rings" && root.frameTarget
+            && Array.from(children).filter(item => item.visible && item.implicitWidth > 0)
+              .every(item => Math.abs(item.implicitWidth - Commons.Style.space(20)) < 1e-7))
+          frameMotion.placed = true
+      }
 
       Repeater {
         id: workspaceRepeater
@@ -380,14 +461,54 @@ Ui.Panel {
           readonly property bool empty: !focused && !occupied
           readonly property int numberWidth: Commons.Style.space(20)
 
-          implicitWidth: root.renderStyle === "numbers" ? Commons.Style.space(22)
-            : root.renderStyle === "kanji" ? Commons.Style.space(22)
-            : root.renderStyle === "magic"
+          // Paint is disposable; focus/hover animation history belongs to the cell.
+          property real defaultHaloWidth: Commons.Style.space(focused ? 34 : 16)
+          property real defaultMarkerWidth: Commons.Style.space(focused ? 26 : 8)
+          property alias magicColor: colorState.magicColor
+          property alias kanjiColor: colorState.kanjiColor
+          property real hoverPhase: root.renderStyle !== "pacman" && cellPointer.containsMouse ? 1 : 0
+          Behavior on hoverPhase { NumberAnimation { duration: 120 } }
+          function tintColor(base) {
+            const amount = hoverPhase
+            if (amount === 0) return base
+            const tint = root.workspaceHoverColor
+            return Qt.rgba(base.r * (1 - amount) + tint.r * amount,
+              base.g * (1 - amount) + tint.g * amount,
+              base.b * (1 - amount) + tint.b * amount,
+              base.a * (1 - amount) + tint.a * amount)
+          }
+          property real ringOpacity: focused ? 1 : occupied ? 0.64 : 0.24
+          property real auroraWidth: Commons.Style.space(focused ? 32 : 10)
+          property real auroraMarkerWidth: Commons.Style.space(focused ? 28 : occupied ? 6 : 4)
+          property real auroraMarkerHeight: Commons.Style.space(focused ? 3 : occupied ? 6 : 4)
+          property real auroraOpacity: focused ? 0.92 : occupied ? 0.62 : 0.18
+          Behavior on defaultHaloWidth { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+          Behavior on defaultMarkerWidth { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+          Item {
+            id: colorState
+            property color magicColor: Qt.rgba(root.widgetInk.r, root.widgetInk.g,
+              root.widgetInk.b, cell.focused ? 1 : cell.occupied ? 0.7 : 0.3)
+            property color kanjiColor: Qt.rgba(root.widgetInk.r, root.widgetInk.g,
+              root.widgetInk.b, cell.focused ? 1 : cell.occupied ? 0.7 : 0.3)
+            Behavior on magicColor { ColorAnimation { duration: 200 } }
+            Behavior on kanjiColor { ColorAnimation { duration: 200 } }
+          }
+          Behavior on ringOpacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+          Behavior on auroraWidth { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+          Behavior on auroraMarkerWidth { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+          Behavior on auroraMarkerHeight { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+          Behavior on auroraOpacity { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+
+          readonly property string geometryStyle: root.paintReady
+            ? root.renderStyle : root.initialRenderStyle
+          implicitWidth: geometryStyle === "numbers" ? Commons.Style.space(22)
+            : geometryStyle === "kanji" ? Commons.Style.space(22)
+            : geometryStyle === "magic"
               ? Commons.Style.space(focused ? 20 : 18)
-            : root.renderStyle === "rings" ? Commons.Style.space(20)
-            : root.renderStyle === "aurora"
+            : geometryStyle === "rings" ? Commons.Style.space(20)
+            : geometryStyle === "aurora"
               ? Commons.Style.space(focused ? 34 : 12)
-            : root.renderStyle === "pacman"
+            : geometryStyle === "pacman"
               ? Commons.Style.space(22)
             : Commons.Style.space(focused ? 32 : 16)
           implicitHeight: workspaceSurface.height
@@ -395,33 +516,63 @@ Ui.Panel {
           Behavior on implicitWidth {
             NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
           }
-          Behavior on scale { NumberAnimation { duration: 120 } }
 
+          // Keep the cell and pointer resident; load only the selected paint.
+          Loader {
+            anchors.fill: parent
+            active: root.renderStyle === "default"
+            sourceComponent: Component { Item {
+              anchors.fill: parent
           Rectangle {
+            id: defaultHalo
+            transform: Translate {
+              x: surfaceInk.enabled ? root.markerShiftX(cell, defaultHalo.x) : 0
+              y: surfaceInk.enabled ? root.markerShiftY(defaultHalo.y, defaultHalo.height) : 0
+            }
             visible: root.renderStyle === "default"
             anchors.centerIn: parent
-            width: Commons.Style.space(cell.focused ? 34 : 16)
+            width: cell.defaultHaloWidth
             height: Commons.Style.space(16)
             radius: height / 2
             color: Qt.rgba(root.widgetInk.r, root.widgetInk.g,
               root.widgetInk.b,
               cell.focused ? 0.20 : cell.occupied ? 0.18 : 0.06)
-            Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
           }
 
           Rectangle {
+            id: defaultMarker
+            transform: Translate {
+              x: surfaceInk.enabled ? root.markerShiftX(cell, defaultMarker.x) : 0
+              y: surfaceInk.enabled ? root.markerShiftY(defaultMarker.y, defaultMarker.height) : 0
+            }
             visible: root.renderStyle === "default"
             anchors.centerIn: parent
-            width: Commons.Style.space(cell.focused ? 26 : 8)
+            width: cell.defaultMarkerWidth
             height: Commons.Style.space(8)
             radius: height / 2
-            color: cell.focused || cell.occupied
+            color: cell.tintColor(cell.focused || cell.occupied
               ? root.widgetInk : Qt.rgba(root.widgetInk.r,
-                root.widgetInk.g, root.widgetInk.b, 0.25)
-            Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                root.widgetInk.g, root.widgetInk.b, 0.25))
           }
 
+            } }
+          }
+
+          Loader {
+            anchors.fill: parent
+            active: root.renderStyle === "numbers"
+            sourceComponent: Component { Item {
+              anchors.fill: parent
           Rectangle {
+            id: numberMarker
+            Presentation.BarInk { id: numberInk; target: numberMarker }
+            property alias inkOffsetX: numberTranslation.x
+            readonly property real inkOffsetY: numberInk.enabled ? numberInk.rectangleY(height) : 0
+            transform: Translate {
+              id: numberTranslation
+              x: numberInk.enabled ? numberInk.snapX(0) : 0
+              y: numberMarker.inkOffsetY
+            }
             visible: root.renderStyle === "numbers"
             anchors.centerIn: parent
             width: cell.numberWidth
@@ -431,13 +582,13 @@ Ui.Panel {
               root.widgetInk.b,
               cell.focused ? 0.30 : cell.occupied ? 0.12 : 0.04)
 
-            Text {
+            Presentation.IconText {
+              barText: true
               anchors.centerIn: parent
-              text: cell.modelData
-              color: cell.focused
-                ? root.widgetInk
+              text: root.workspaceLabel(cell.modelData)
+              color: cell.tintColor(cell.focused ? root.widgetInk
                 : Qt.rgba(root.widgetInk.r, root.widgetInk.g,
-                  root.widgetInk.b, cell.occupied ? 0.5 : 0.28)
+                  root.widgetInk.b, cell.occupied ? 0.5 : 0.28))
               font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
               font.pixelSize: cell.focused
                 ? Commons.Style.font.subtitle : root.tokens.labelSize
@@ -446,89 +597,115 @@ Ui.Panel {
             }
           }
 
-          Text {
+            } }
+          }
+
+          Loader {
+            anchors.fill: parent
+            active: root.renderStyle === "magic"
+            sourceComponent: Component { Item {
+              anchors.fill: parent
+          Presentation.IconText {
+            barText: true
+            wholeInk: true
             visible: root.renderStyle === "magic"
             anchors.centerIn: parent
             anchors.verticalCenterOffset: cell.focused ? 0 : 1
             text: cell.focused ? "✦" : cell.occupied ? "✧" : "·"
-            color: Qt.rgba(root.widgetInk.r, root.widgetInk.g,
-              root.widgetInk.b, cell.focused ? 1 : cell.occupied ? 0.7 : 0.3)
+            color: cell.tintColor(cell.magicColor)
             font.family: "Adwaita Mono"
             font.pixelSize: Commons.Style.space(cell.focused ? 22 : 18)
             renderType: Text.NativeRendering
-
-            Behavior on color { ColorAnimation { duration: 200 } }
           }
 
-          Text {
+            } }
+          }
+
+          Loader {
+            anchors.fill: parent
+            active: root.renderStyle === "kanji"
+            sourceComponent: Component { Item {
+              anchors.fill: parent
+          Presentation.IconText {
+            barText: true
+            wholeInk: true
+            hintedInk: true
             visible: root.renderStyle === "kanji"
             anchors.centerIn: parent
-            text: cell.modelData >= 1 && cell.modelData <= 10
+            text: root.workspaceLabel(cell.modelData) >= 1 && root.workspaceLabel(cell.modelData) <= 10
               ? ["一", "二", "三", "四", "五",
-                 "六", "七", "八", "九", "十"][cell.modelData - 1]
+                 "六", "七", "八", "九", "十"][root.workspaceLabel(cell.modelData) - 1]
               : String(cell.modelData)
-            color: Qt.rgba(root.widgetInk.r, root.widgetInk.g,
-              root.widgetInk.b, cell.focused ? 1 : cell.occupied ? 0.7 : 0.3)
+            color: cell.tintColor(cell.kanjiColor)
             font.family: "Noto Sans CJK JP"
             font.pixelSize: Commons.Style.space(cell.focused ? 15 : 13)
             font.weight: Font.Normal
             renderType: Text.NativeRendering
-
-            Behavior on color { ColorAnimation { duration: 200 } }
           }
 
-          Text {
+            } }
+          }
+
+          Loader {
+            anchors.fill: parent
+            active: root.renderStyle === "rings"
+            sourceComponent: Component { Item {
+              anchors.fill: parent
+          Presentation.IconText {
+            barText: true
             visible: root.renderStyle === "rings"
             anchors.centerIn: parent
-            text: cell.modelData
-            color: root.widgetInk
-            opacity: cellPointer.containsMouse ? 1
-              : cell.focused ? 1 : cell.occupied ? 0.64 : 0.24
+            text: root.workspaceLabel(cell.modelData)
+            color: cell.tintColor(root.widgetInk)
+            opacity: cell.ringOpacity + (1 - cell.ringOpacity) * cell.hoverPhase
             font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
             font.pixelSize: Commons.Style.space(12)
             font.weight: Font.Normal
             font.hintingPreference: Font.PreferNoHinting
             renderType: Text.QtRendering
-
-            Behavior on opacity {
-              NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
-            }
           }
 
+            } }
+          }
+
+          Loader {
+            anchors.fill: parent
+            active: root.renderStyle === "aurora"
+            sourceComponent: Component { Item {
+              anchors.fill: parent
           Item {
             visible: root.renderStyle === "aurora"
             anchors.centerIn: parent
-            width: Commons.Style.space(cell.focused ? 32 : 10)
+            width: cell.auroraWidth
             height: Commons.Style.space(16)
 
-            Behavior on width {
-              NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
-            }
-
             Rectangle {
-              anchors.centerIn: parent
-              width: Commons.Style.space(
-                cell.focused ? 28 : cell.occupied ? 6 : 4)
-              height: Commons.Style.space(
-                cell.focused ? 3 : cell.occupied ? 6 : 4)
+              id: auroraMarker
+              transform: Translate {
+                x: surfaceInk.enabled ? root.markerShiftX(cell,
+                  auroraMarker.parent.x + auroraMarker.x) : 0
+                y: surfaceInk.enabled ? root.markerShiftY(
+                  auroraMarker.parent.y + auroraMarker.y, auroraMarker.height) : 0
+              }
+              anchors.verticalCenter: parent.verticalCenter
+              x: surfaceInk.rasterExtent((parent.width - width) / 2)
+              width: surfaceInk.rasterExtent(cell.auroraMarkerWidth)
+              height: cell.auroraMarkerHeight
               radius: height / 2
-              color: root.widgetInk
-              opacity: cellPointer.containsMouse ? 1
-                : cell.focused ? 0.92 : cell.occupied ? 0.62 : 0.18
+              color: cell.tintColor(root.widgetInk)
+              opacity: cell.auroraOpacity + (1 - cell.auroraOpacity) * cell.hoverPhase
               antialiasing: true
-
-              Behavior on width {
-                NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
-              }
-              Behavior on height {
-                NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
-              }
-              Behavior on opacity {
-                NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
-              }
             }
           }
 
+            } }
+          }
+
+          Loader {
+            anchors.fill: parent
+            active: root.renderStyle === "pacman" && root.paintReady
+            sourceComponent: Component { Item {
+              anchors.fill: parent
           Presentation.PacmanWorkspaceMarker {
             visible: root.renderStyle === "pacman"
             anchors.centerIn: parent
@@ -546,6 +723,9 @@ Ui.Panel {
             hoverColor: root.pacmanHoverColor
           }
 
+            } }
+          }
+
           MouseArea {
             id: cellPointer
             anchors.fill: parent
@@ -553,14 +733,10 @@ Ui.Panel {
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
             onEntered: {
-              cell.scale = root.renderStyle === "rings" ? 1
-                : root.renderStyle === "pacman" ? 1
-                : root.renderStyle === "aurora" ? 1.04 : 1.15
               if (root.bar) root.bar.showTooltip(
                 workspaceSurface, root.workspaceTooltip(cell.modelData))
             }
             onExited: {
-              cell.scale = 1
               if (root.bar) root.bar.hideTooltip(workspaceSurface)
             }
             onClicked: function(mouse) {
@@ -582,7 +758,10 @@ Ui.Panel {
       width: Commons.Style.space(22)
       height: Commons.Style.space(18)
 
-      Item {
+      Loader {
+        anchors.fill: parent
+        active: root.renderStyle === "pacman"
+        sourceComponent: Component { Item {
         id: pacmanRunnerVisual
         anchors.fill: parent
         transform: Scale {
@@ -631,6 +810,8 @@ Ui.Panel {
             context.fill()
           }
         }
+        }
+      }
       }
     }
   }

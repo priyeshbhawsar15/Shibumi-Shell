@@ -89,6 +89,7 @@ ShibumiPanel {
     }
     if (cursorSection !== "displays" || cursorIndex < 0
         || cursorIndex >= monitorService.displays.length) return
+    if (!monitorService.displayToggleAvailable) return
     const display = monitorService.displays[cursorIndex]
     if (!display || (display.enabled && monitorService.enabledDisplayCount <= 1)) return
     monitorService.toggleDisplay(display.name, display.enabled)
@@ -146,16 +147,12 @@ ShibumiPanel {
           width: parent.width
           spacing: Commons.Style.space(4)
 
-          Text {
+          Presentation.PanelHeading {
             width: parent.width - headerActions.width - parent.spacing
             anchors.verticalCenter: parent.verticalCenter
             text: "Display"
             color: panel.bar ? panel.bar.foreground : Commons.Color.foreground
             font.family: panel.bar ? panel.bar.fontFamily : Commons.Style.font.family
-            font.pixelSize: Commons.Style.font.heading
-            font.letterSpacing: 2
-            font.weight: Font.Medium
-            renderType: Text.NativeRendering
           }
 
           Row {
@@ -350,6 +347,7 @@ ShibumiPanel {
 
           Ui.CursorSurface {
             id: textSizeRow
+            radius: panel.controlRadius
             width: parent.width
             height: textSizeSlider.implicitHeight
               + Commons.Style.spacing.controlGap
@@ -627,6 +625,7 @@ ShibumiPanel {
     readonly property bool enabledDisplay: display && display.enabled === true
     readonly property bool focusedDisplay: display && display.focused === true
     readonly property bool canToggle: display
+      && panel.monitorService.displayToggleAvailable
       && (!enabledDisplay || panel.monitorService.enabledDisplayCount > 1)
     readonly property bool keyboardFocused: panel.cursorActive
       && panel.cursorSection === "displays" && panel.cursorIndex === rowIndex

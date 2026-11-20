@@ -86,8 +86,11 @@ baseline.
 - V1 can explicitly add one center slot in edit mode: at most two center
   positions total. The default remains G8 alone; existing saved layouts are
   not expanded on load. Only an empty extra slot can be removed. Center slots
-  use the existing drag/drop and gap treatment without an internal center
-  divider or new split-schema field. G8's width budget excludes its center
+  use the existing drag/drop and gap treatment. A two-position center exposes
+  one positional split with the existing marker and spacing. Missing
+  `splits.center` migrates to a disabled array of the required length without a
+  settings-schema version bump; an explicitly malformed field rejects the V1
+  layout as a unit. G8's width budget excludes its center
   sibling; when G8 is disabled or has no loaded widget, the first loaded,
   stage-shown center group owns the remainder. Owner selection uses loading
   readiness, not its budget-dependent geometry, to avoid binding feedback.
@@ -101,6 +104,15 @@ baseline.
   field, saved-layout migration or V2 removal change is introduced. The
   Control Center preflights installed V1 bar widgets before starting plugin
   uninstall; bar removal still revalidates the layout at its own mutation.
+- V1 activation allocates normally, then uses an empty base whose owner is
+  placed elsewhere, then reclaims a disabled extra occupant. Fixed and dynamic
+  occupants share requested-region / remaining left-center-right / lowest-index
+  priority. Disabled fixed bases and active occupants are never reclaimed.
+  Reclaimed fixed identities remain in optional `order.parked`, not in slots;
+  every G1-G15 identity must occur exactly once across slots and that bounded
+  list. Settings remain intact. Re-enabling requires atomic placement plus
+  V1 state through the same allocator, or refuses without writes. V2, capacity
+  limits, the optional-center rule and positional splits remain unchanged.
 - All split boundaries start disabled. Split markers, drag targets, invalid
   returns, persistence, and geometry must retain the V1 behavior.
 - V1 and V2 own independent optional layout-protection preferences. Both
@@ -150,7 +162,8 @@ baseline.
   selected-provider flows; package-bound physical acceptance remains open.
   Family replacement does not increase capacity; the separately approved
   optional V1 center slot follows
-  the limits above. V2 layout semantics and the saved schema remain unchanged.
+  the limits above. V2 layout semantics remain unchanged, and the settings
+  schema stays at version 1.
 - G1 is the Shibumi wordmark and Control Center. Omarchy remains the sole owner
   of the application launcher menu; G1 neither owns nor opens it.
 - G1 exposes the current V1 palette contract: colors 01-07 plus foreground,
@@ -234,7 +247,8 @@ The lifecycle contract and uncompleted physical gates are defined in
 
 ### Ownership, Performance, And Safety
 
-- Every platform capability has one authoritative state and action owner.
+- Every platform capability has one authoritative state and action owner,
+  except the explicitly scoped media-panel controls documented under G9 below.
   Quattro or Quickshell remains authoritative when it exposes a sufficient
   service contract.
 - Shibumi adds a narrow adapter only when the host contract cannot produce the
@@ -389,6 +403,13 @@ Shibumi controls the bar window.
 
 ## Verified Host Contract
 
+`SuiteRuntime.HostContract` is the suite's single constant-only QML compatibility
+layer for first-party service admission, host marker/theme paths and IPC target
+names. Existing services retain handler ownership, file readers and the bounded
+visibility handoff; palette APIs and command routing are unchanged. Host versions
+remain in baseline manifests, which also supply the release collector's package
+probe expectations. The pinned Quattro contract binds this layer to host sources.
+
 The installed loader and installation contracts were rechecked against
 the validation system's Omarchy Quattro package `4.0.0.r1458.gfa6b5fc-1` on 2026-07-30.
 The plugin registry, validator, installer, bar selector, bar loader, and
@@ -418,7 +439,7 @@ checks pass.
 - The shared runtime owns one process-singleton `omarchy.bar`
   visibility-nudge handler, enabled only for the one fully admitted active
   Shibumi bar. It exposes only `syncHidden`, which asks that owner to re-read
-  Omarchy's host-owned `bar-off` marker after `omarchy-toggle-bar` changes it;
+  Omarchy's host-owned `bar-off` or `bar-hidden` marker after `omarchy-toggle-bar` changes it;
   the directory watcher remains the ordinary update path. Incoming ownership
   arms only after the bounded host-handler handoff window; changing the
   host-injected bar identity revokes outgoing ownership synchronously.
@@ -504,6 +525,14 @@ the saved preference.
   Normal uninstall removes canonical and legacy settings. `--keep-settings`
   retains the complete canonical State entry, including unknown fields and deep
   settings, dormant while its plugin payload is absent. Reinstall reuses it.
+  Managed CLI deactivation also retains the Shibumi layout in that entry's
+  `shibumiRetainedLayout` sibling, shared with `uninstall --keep-settings`.
+  Activation consumes it before shell start, preserving placement/order/entry
+  settings except foreign widgets no longer placed in the freshly read native
+  layout. Suite widgets intentionally removed by deactivation are restored;
+  deferred tray data and `--keep-layout` policy are unchanged. The continuity
+  manager's two-owner layout/center-anchor profiles remain a separate journaled
+  mechanism; this fix does not migrate or merge those profile stores.
 
 ## Design Rules
 
@@ -569,9 +598,9 @@ directly and State precedes them in suite order.
 The ownership, lifetime, version and publication rules are normative in
 [`docs/architecture/shared-runtime-v1.md`](docs/architecture/shared-runtime-v1.md).
 This is not a QML sandbox or an authorization to expose private host services.
-`ShibumiPanel.qml` retains three UI-lifecycle timers and therefore remains the
-only canonical source under `shared/presentation/`; its existing plugin and
-`widgets/` copies stay deterministically vendored and drift-checked. Bar-host
+`ShibumiPanel.qml` and the open-panel-only `WaterRing.qml` retain UI-lifecycle
+clocks and therefore stay canonical under `shared/presentation/`, outside the
+passive State library. Their copies are deterministically vendored and drift-checked. Bar-host
 and feature-owner sources are maintained directly in their
 `hancore.shibumi.*` plugin roots. Panels may consume services; services do not
 import panels.
@@ -839,9 +868,13 @@ Current Phase 2 foundation:
   repository-owned compatibility contract rather than inferred from mutable
   installed files.
 - G9 replaces only the official media presentation. The keep-loaded
-  `omarchy.media` service remains the sole MPRIS/PipeWire selection and action
+  `omarchy.media` service remains the MPRIS/PipeWire selection and transport-action
   owner while Shibumi views supply the default row, FULL/muse row, lazy panel,
-  progress, cover art, and source selection;
+  progress, cover art, and source selection. The approved panel-only exception is
+  direct shuffle, repeat and seek through the selected native MprisPlayer's public
+  properties, gated by its current capabilities. Seek also requires supported
+  position/length and the same player/track as at press. No discovery, process,
+  IPC owner or OSD is added; previous/play/pause/next still use Omarchy `runAction`;
 - closed media views are worker-free. One lazy process-wide Shibumi spectrum
   service owns the optional Cava capability/default-sink probe, bounded Cava
   process, streamed configuration, degraded state, and cleanup. It runs only
@@ -929,22 +962,33 @@ Current Phase 2 foundation:
   `BluetoothBackendAdapter`. The adapter keeps native BlueZ device QObjects
   private and publishes detached primitive records carrying the device path,
   address, adapter identity, and monotonic device/adapter incarnations. Every
-  mutation resolves exactly one current entity immediately before dispatch;
-  stale, malformed, ambiguous, unavailable, or state-conflicting requests
-  return typed failures and dispatch nothing. Beta.13 deliberately retains one
-  `omarchy-bluetooth-device` helper path per device action and never invokes a
-  native device method in parallel. Because the 4.0.2 helper accepts only an
-  action/address pair, production fails closed with more than one adapter; the
-  residual replacement race after dispatch remains explicit Step-4B helper
-  debt. Callers inspect `.ok` explicitly. The
-  adapter also owns pending state and Bluetooth-audio handoff; no complete
-  Omarchy Bluetooth UI component is instantiated as a backend;
+  device mutation resolves exactly one current entity immediately before dispatch;
+  stale, malformed, ambiguous, unavailable, or state-conflicting device requests
+  return typed failures and dispatch nothing. Device actions retain one
+  `omarchy-bluetooth-device` helper path and never invoke a native device method
+  in parallel. Because the helper accepts only an action/address pair, device
+  actions fail closed with more than one production adapter; the residual
+  replacement race after dispatch remains explicit Step-4B helper debt.
+  Device callers inspect `.ok` explicitly. The adapter also owns pending state
+  and Bluetooth-audio handoff; no complete Omarchy Bluetooth UI component is
+  instantiated as a backend. Global radio power is a separate host action:
+  one argv-only detached `omarchy-bluetooth-power on|off` request applies
+  Omarchy's rfkill persistence policy to all Bluetooth radios. It can clear a
+  soft block, not a hardware block. Bar, panel, and IPC share this power path;
+  no direct `adapter.enabled` write or helper `toggle` is used. BlueZ's observed
+  `adapter.enabled` remains authoritative for the displayed state, not dispatch
+  success. Repeat clicks are ignored while the adapter-bound target is pending;
+  observing that target, adapter loss/replacement, a dispatch exception, or the
+  deadline clears it. Power-off stops owned discovery;
 - each output owns only its V1 Bluetooth presentation and lazy Shibumi device
   panel. The process-wide service leases discovery across open panels and owns one
   symmetric six-method `omarchy.bluetooth` IPC target. Presentation has no
   Bluetooth/PipeWire import, process, timer, or file watcher; the service facade
-  owns one bounded discovery-reconciliation timer and the adapter owns four
-  bounded lifecycle timers. While a requested Discovery start is still pending
+  owns one bounded discovery-reconciliation timer and the adapter owns five
+  bounded lifecycle timers, including a separate one-shot 20-second power-state
+  deadline. This clears pending state, not the detached helper process; late
+  helper effects remain possible. It is not a process timeout or cancellation.
+  While a requested Discovery start is still pending
   during teardown, at most one temporary 30-second retry/expiry timer per
   native adapter survives the facade. Top mapping, adapter/radio
   reactivity, discovery ownership/teardown, both backend load orders, and IPC

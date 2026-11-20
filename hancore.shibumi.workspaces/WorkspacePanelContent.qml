@@ -45,7 +45,7 @@ Item {
         width: parent.width
         height: 24
 
-        Text {
+        Presentation.PanelHeading {
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
           text: "Workspaces"
@@ -133,7 +133,9 @@ Item {
             anchors.leftMargin: 10
             anchors.rightMargin: 10
             anchors.verticalCenter: parent.verticalCenter
-            text: "Workspace " + row.modelData.id
+            text: "Workspace " + (root.workspaceService
+              && root.workspaceService.perMonitorWorkspaces === true
+                ? root.workspaceService.slotOf(row.modelData.id) : row.modelData.id)
             color: row.current || row.hasCursor ? root.controller.controlAccent
               : root.bar ? root.bar.foreground : Commons.Color.foreground
             font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family

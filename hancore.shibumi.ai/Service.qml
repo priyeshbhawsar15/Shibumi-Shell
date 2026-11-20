@@ -1,6 +1,7 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQml.Models
 import Quickshell
 import Quickshell.Io
 import "../hancore.shibumi.state/runtime" as SuiteRuntime
@@ -19,7 +20,7 @@ Item {
   SuiteRuntime.HostShell { id: suiteShell; host: root.shell }
   SuiteRuntime.Provider {
     pluginId: "hancore.shibumi.ai"
-    implementationVersion: "0.1.1-beta.14.1"
+    implementationVersion: "0.2.5"
     owner: root
     host: root.shell
     manifest: root.manifest
@@ -40,8 +41,9 @@ Item {
   property bool claudeAvailable: false
   property bool codexAvailable: false
   property bool openCodeAvailable: false
-  property var agentsClaudeRecord: null
-  property var agentsCodexRecord: null
+  property var agentIds: []
+  property var agentRecords: ({})
+  property bool pendingAgentScan: false
   // Current third-party PluginShellApi instances intentionally do not expose
   // the host registry. Prefer the current agents backend when the host root is
   // available; the bounded wrapper returns 66 only when that backend itself is
@@ -49,19 +51,38 @@ Item {
   property bool agentsBackendUnavailable: false
   readonly property double nextAgentRecordExpiryAtMs: {
     const expiries = []
-    if (agentsClaudeRecord && Number(agentsClaudeRecord.expiresAtMs) > 0)
-      expiries.push(Number(agentsClaudeRecord.expiresAtMs))
-    if (agentsCodexRecord && Number(agentsCodexRecord.expiresAtMs) > 0)
-      expiries.push(Number(agentsCodexRecord.expiresAtMs))
+    void(providerRevision)
+    for (const id of Object.keys(agentRecords)) {
+      const record = agentRecords[id]
+      if (record && Number(record.expiresAtMs) > 0)
+        expiries.push(Number(record.expiresAtMs))
+    }
     return expiries.length > 0 ? Math.min.apply(null, expiries) : 0
   }
-  property bool agentsUpdateHealthy: false
   property int providerRevision: 0
   property string backendProcessKind: ""
   property string backendOutput: ""
   property string backendError: ""
   property bool pendingBackendRefresh: false
   property bool pendingBackendForce: false
+  property bool pendingBackendDiscovery: false
+  property bool runningBackendDiscovery: true
+  property double lastDiscoveryStartedAtMs: 0
+  property double cachedDiscoveryAtMs: 0
+  property bool startupProviderEnablementChanged: false
+  // Admission/host injection can change the lifecycle signature after completion;
+  // only a change to the enabled provider set invalidates the cached discovery.
+  readonly property string disabledProviderSignature: Object.keys(settings.providers || {})
+    .filter(id => !providerEnabled(id)).sort().join(",")
+  onDisabledProviderSignatureChanged: if (providerSettingsReady) startupProviderEnablementChanged = true
+  readonly property int agentsDiscoveryInterval: 6 * 60 * 60 * 1000
+  readonly property int startupRefreshDelayMs: 10 * 1000
+  readonly property int startupDiscoveryDelayMs: 120 * 1000
+  property bool startupRefreshPending: true
+  property bool startupDiscoveryPending: true
+  readonly property var tabProviderIds: providers.filter(provider =>
+    provider.providerId !== "opencode" && providerEnabled(provider.providerId))
+    .map(provider => provider.providerId)
   property bool providerSettingsReady: false
   property int providerSettingsGeneration: 0
   property int runningSettingsGeneration: 0
@@ -127,17 +148,15 @@ Item {
   }
   readonly property string providerEnablementSignature:
     JSON.stringify({
-      claude: providerEnabled("claude"),
-      codex: providerEnabled("codex"),
-      opencode: providerEnabled("opencode"),
+      providers: settings.providers || ({}),
       active: serviceActive,
       probes: runtimeProbesEnabled,
       agentsSource: agentsSource,
       agentsUnavailable: agentsBackendUnavailable,
       legacySource: modelUsageSource
     })
-  readonly property bool anyProviderEnabled:
-    providerEnabled("claude") || providerEnabled("codex")
+  readonly property bool anyProviderEnabled: agentsBackendActive
+    || providerEnabled("claude") || providerEnabled("codex")
       || providerEnabled("opencode")
   readonly property var providers: {
     void(providerRevision)
@@ -146,17 +165,17 @@ Item {
     if (!serviceActive) return result
     if (Array.isArray(providerOverrides) && providerOverrides.length > 0) {
       appendProviderSnapshots(result, providerOverrides)
-      return result
+      return orderProviders(result)
     }
     if (agentsBackendActive) {
-      appendProviderSnapshot(result, agentsClaudeRecord)
-      appendProviderSnapshot(result, agentsCodexRecord)
+      for (const id of Object.keys(agentRecords))
+        appendProviderSnapshot(result, agentRecords[id])
     } else {
       appendProviderSnapshot(result, claudeLoader.item)
       appendProviderSnapshot(result, codexLoader.item)
     }
     if (openCodeProvider.enabled) appendProviderSnapshot(result, openCodeProvider)
-    return result
+    return orderProviders(result)
   }
   readonly property string selectedTool: resolveTool(requestedTool)
   readonly property var selectedProvider: providerFor(selectedTool)
@@ -270,6 +289,35 @@ Item {
     return result
   }
 
+  function agentModels(usage) {
+    const rows = Object.keys(usage || {}).map(name => {
+      const data = usage[name] || {}, row = { name: name }, fields = {
+        input: "inputTokens", output: "outputTokens", cacheRead: "cacheReadInputTokens", cacheWrite: "cacheCreationInputTokens" }
+      let total = 0
+      for (const key in fields) {
+        const value = AgentUsageModel.nonNegativeNumber(data[fields[key]])
+        total += value; row[key + "Label"] = formatTokens(value)
+      }
+      return Object.assign(row, { total: total, totalLabel: formatTokens(total) })
+    }).filter(row => row.total > 0).sort((a, b) => b.total - a.total).slice(0, 16)
+    return rows.map(row => Object.assign(row, { pct: row.total / rows[0].total * 100 }))
+  }
+
+  function limitWindows(provider) {
+    if (!provider) return []
+    const limits = provider.limits || [
+      { label: provider.rateLimitLabel || "Primary", percent: provider.rateLimitPercent, resetsAt: provider.rateLimitResetAt },
+      { label: provider.secondaryRateLimitLabel || "Secondary", percent: provider.secondaryRateLimitPercent, resetsAt: provider.secondaryRateLimitResetAt }]
+    return limits.slice(0, 6).map(limit => Object.assign({}, limit, {
+      title: limit.title || String(limit.label).replace(/\s*\(.*\)\s*/, "").trim(),
+      percent: displayPercent(provider, limit.percent)
+    })).filter(limit => limit.percent >= 0)
+  }
+
+  function bindingWindow(provider) {
+    return limitWindows(provider).reduce((best, limit) => !best || limit.percent > best.percent ? limit : best, null)
+  }
+
   function agentRecordFresh(record, nowMs) {
     if (!record || String(record.backend || "") !== "omarchy.agents")
       return true
@@ -281,15 +329,16 @@ Item {
   }
 
   function providerSnapshot(provider, nowMs) {
-    if (!provider || !agentRecordFresh(provider, nowMs)) return null
+    const currentMs = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+    if (!provider || !agentRecordFresh(provider, currentMs)) return null
     const id = String(provider.providerId || "")
     if (!id || !providerEnabled(id)) return null
     return {
       providerId: id,
       providerName: String(provider.providerName || id).slice(0, 512),
-      ready: (provider.ready !== undefined ? provider.ready === true : true)
-        && (String(provider.backend || "") !== "omarchy.agents"
-          || agentsUpdateHealthy),
+      ready: provider.ready !== undefined ? provider.ready === true : true,
+      fresh: String(provider.backend || "") !== "omarchy.agents"
+        || currentMs - Number(provider.updatedAtMs) <= 2 * agentsRefreshInterval,
       rateLimitPercent: Number(provider.rateLimitPercent) >= 0
         ? Number(provider.rateLimitPercent) : -1,
       rateLimitLabel: String(provider.rateLimitLabel || "").slice(0, 512),
@@ -306,7 +355,9 @@ Item {
       todaySessions: Math.max(0, Number(provider.todaySessions) || 0),
       windowTokens: Math.max(0, Number(provider.windowTokens) || 0),
       hourlyTokens: Math.max(0, Number(provider.hourlyTokens) || 0),
-      models: cloneModels(provider.models),
+      limits: provider.limits,
+      recentDays: provider.recentDays || [],
+      models: cloneModels(provider.backend === "omarchy.agents" ? agentModels(provider.modelUsage) : provider.models),
       tierLabel: String(provider.tierLabel || "").slice(0, 512),
       usageStatusText: String(provider.usageStatusText || "").slice(0, 512),
       authHelpText: String(provider.authHelpText || "").slice(0, 512),
@@ -338,11 +389,16 @@ Item {
   function resolveTool(preferred) {
     const requested = String(preferred || "")
     if (providerFor(requested)) return requested
-    const order = ["claude", "codex", "opencode"]
-    for (let index = 0; index < order.length; index++) {
-      if (providerFor(order[index])) return order[index]
-    }
-    return ""
+    return providers.length ? providers[0].providerId : ""
+  }
+
+  function orderProviders(source) {
+    return source.sort((a, b) => {
+      const first = a.providerId, second = b.providerId
+      if (first === "opencode") return 1
+      if (second === "opencode") return -1
+      return first < second ? -1 : first > second ? 1 : 0
+    })
   }
 
   function selectTool(id) {
@@ -403,7 +459,7 @@ Item {
       || Number(provider.todaySessions) > 0
       || Number(provider.windowTokens) > 0
       || Number(provider.hourlyTokens) > 0
-      || (Array.isArray(provider.models) && provider.models.length > 0)
+      || (provider.backend !== "omarchy.agents" && Array.isArray(provider.models) && provider.models.length > 0)
       || String(provider.latestModel || "") !== ""
   }
 
@@ -414,7 +470,7 @@ Item {
   }
 
   function providerStatusText(provider) {
-    if (!provider || provider.ready === false) return "stale"
+    if (!provider || provider.ready === false || provider.fresh === false) return "stale"
     if (String(provider.providerId || "") === "codex"
         && Number(provider.rateLimitPercent) < 0
         && Number(provider.secondaryRateLimitPercent) < 0)
@@ -425,8 +481,7 @@ Item {
   function displayPercent(provider, value) {
     const number = Number(value)
     if (!isFinite(number) || number < 0) return -1
-    const providerId = provider ? String(provider.providerId || "") : ""
-    if ((providerId === "claude" || providerId === "codex") && number <= 1)
+    if (number <= 1 && (!provider || provider.providerId !== "opencode"))
       return Math.min(100, number * 100)
     return Math.min(100, number)
   }
@@ -437,10 +492,10 @@ Item {
     return label
   }
 
-  function resetText(_provider, timestamp) {
+  function resetText(_provider, timestamp, nowMs) {
     if (!timestamp) return ""
     const reset = new Date(timestamp)
-    const diffMs = reset.getTime() - Date.now()
+    const diffMs = reset.getTime() - (nowMs === undefined ? Date.now() : nowMs)
     if (!isFinite(diffMs)) return ""
     if (diffMs <= 0) return "now"
     const hours = Math.floor(diffMs / 3600000)
@@ -463,75 +518,24 @@ Item {
   }
 
   function tooltipText() {
-    if (providers.length === 0) return "No AI usage providers detected"
-    const lines = []
-    for (let index = 0; index < providers.length; index++) {
-      const provider = providers[index]
-      if (lines.length) lines.push("")
-      let heading = String(provider.providerName || provider.providerId || "AI")
-      if (displayTierLabel(provider.tierLabel))
-        heading += " (" + displayTierLabel(provider.tierLabel) + ")"
-      const status = providerStatusText(provider)
-      if (status !== "live") heading += " · " + status
-      lines.push(heading)
-      if (Number(provider.rateLimitPercent) >= 0) {
-        const reset = resetText(provider, provider.rateLimitResetAt)
-        lines.push(String(provider.rateLimitLabel || "Primary") + ": "
-          + Math.round(displayPercent(provider, provider.rateLimitPercent)) + "%"
-          + (reset ? " · resets in " + reset : ""))
-      }
-      if (Number(provider.secondaryRateLimitPercent) >= 0) {
-        const reset = resetText(provider, provider.secondaryRateLimitResetAt)
-        lines.push(String(provider.secondaryRateLimitLabel || "Secondary") + ": "
-          + Math.round(displayPercent(provider,
-            provider.secondaryRateLimitPercent)) + "%"
-          + (reset ? " · resets in " + reset : ""))
-      }
-      if (String(provider.providerId || "") === "codex"
-          && !providerReportsFiveHour(provider))
-        lines.push("5h: not reported by Codex RPC")
-      if (String(provider.usageStatusText || "")
-          && String(provider.providerId || "") === "codex")
-        lines.push("General limit: " + String(provider.usageStatusText))
-      const providerId = String(provider.providerId || "")
-      if (providerId === "opencode") {
-        if (Number(provider.windowTokens) > 0)
-          lines.push("5h tokens: " + formatTokens(provider.windowTokens))
-        if (Number(provider.hourlyTokens) > 0)
-          lines.push("1h rate: " + formatTokens(provider.hourlyTokens) + "/h")
-      } else if (Number(provider.windowTokens) > 0) {
-        let activity = formatTokens(provider.windowTokens) + " tokens"
-        if (Number(provider.hourlyTokens) > 0)
-          activity += " · " + formatTokens(provider.hourlyTokens) + "/h"
-        lines.push(activity)
-      } else if (Number(provider.hourlyTokens) > 0) {
-        lines.push("Rate: " + formatTokens(provider.hourlyTokens) + "/h")
-      }
-      if (provider.todayTotalTokens !== undefined
-          && Number(provider.todayTotalTokens) > 0)
-        lines.push("Today: " + formatTokens(provider.todayTotalTokens) + " tokens")
-      const todayPrompts = Math.max(0, Number(provider.todayPrompts) || 0)
-      const todaySessions = Math.max(0, Number(provider.todaySessions) || 0)
-      if (todayPrompts > 0 || todaySessions > 0) {
-        const activity = []
-        if (todayPrompts > 0)
-          activity.push(todayPrompts + (todayPrompts === 1 ? " prompt" : " prompts"))
-        if (todaySessions > 0)
-          activity.push(todaySessions + (todaySessions === 1 ? " session" : " sessions"))
-        lines.push("Today activity: " + activity.join(" · "))
-      }
-      if (String(provider.latestModel || ""))
-        lines.push((providerId === "opencode" ? "Latest today: " : "")
-          + String(provider.latestModel))
-      const currentDataMessage = providerCurrentDataMessage(provider)
-      if (currentDataMessage) lines.push(currentDataMessage)
-    }
-    return lines.join("\n")
+    const provider = selectedProvider
+    if (!provider) return "No AI usage providers detected"
+    const heading = String(provider.providerName || provider.providerId || "AI")
+      + " · " + providerStatusText(provider)
+    const limit = bindingWindow(provider)
+    if (!limit && provider.usageStatusText)
+      return heading + "\n" + String(provider.usageStatusText)
+    if (provider.ready === false) return heading
+    if (!limit) return heading + "\nLimits: Unavailable"
+    const reset = resetText(provider, limit.resetsAt)
+    return heading + "\n" + limit.title + ": " + Math.round(limit.percent) + "%"
+      + (reset ? " · resets in " + reset : "")
   }
 
   function formatTokens(value) {
     const count = Math.max(0, Number(value) || 0)
-    if (count >= 1000000) return (count / 1000000).toFixed(2) + "M"
+    if (count >= 1000000000) return (count / 1000000000).toFixed(1) + "B"
+    if (count >= 1000000) return (count / 1000000).toFixed(1) + "M"
     if (count >= 1000) return (count / 1000).toFixed(1) + "K"
     return String(Math.round(count))
   }
@@ -554,30 +558,30 @@ Item {
   }
 
   function applyAgentRecord(expectedId, raw, nowMs) {
-    const record = AgentUsageModel.parseRecord(raw, expectedId, nowMs)
-    if (expectedId === "claude") agentsClaudeRecord = record
-    else if (expectedId === "codex") agentsCodexRecord = record
+    if (expectedId === "opencode") return
+    const record = AgentUsageModel.parseRecord(raw, expectedId, nowMs, updatedAtMs => {
+      if (startupDiscoveryPending) cachedDiscoveryAtMs = Math.max(cachedDiscoveryAtMs, updatedAtMs)
+    })
+    agentRecords[expectedId] = record
     providerRevision++
   }
 
   function expireAgentRecords(nowMs) {
     const currentMs = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
     let changed = false
-    if (agentsClaudeRecord && !agentRecordFresh(agentsClaudeRecord, currentMs)) {
-      agentsClaudeRecord = null
-      changed = true
+    for (const id of Object.keys(agentRecords)) {
+      if (agentRecords[id] && !agentRecordFresh(agentRecords[id], currentMs)) {
+        delete agentRecords[id]
+        changed = true
+      }
     }
-    if (agentsCodexRecord && !agentRecordFresh(agentsCodexRecord, currentMs)) {
-      agentsCodexRecord = null
-      changed = true
-    }
-    if (changed) providerRevision++
+    // Recheck status by age even before the record's admission expires.
+    if (changed || Object.keys(agentRecords).length) providerRevision++
     return changed
   }
 
   function clearAgentRecord(expectedId) {
-    if (expectedId === "claude") agentsClaudeRecord = null
-    else if (expectedId === "codex") agentsCodexRecord = null
+    delete agentRecords[expectedId]
     providerRevision++
   }
 
@@ -594,16 +598,32 @@ Item {
     ].join("; ")]
   }
 
-  function agentsUpdateCommand(force) {
+  function agentsUpdateCommand(force, discovery) {
     const command = [agentsUpdateScript, String(omarchyPath || "")]
-    if (!providerEnabled("claude") && !providerEnabled("codex")) {
-      command.push("--probe-only")
-      return command
-    }
+    // Omarchy discovers collectors; Shibumi owns OpenCode independently.
     if (force === true) command.push("--force")
-    if (providerEnabled("claude")) command.push("claude")
-    if (providerEnabled("codex")) command.push("codex")
+    command.push("--except", "opencode")
+    for (const id of Object.keys(settings.providers || {})) {
+      if (id !== "opencode" && !providerEnabled(id)) command.push("--except", id)
+    }
+    if (force !== true && discovery === false) command.push(...tabProviderIds)
     return command
+  }
+
+  function panelOpened() {
+    if (!agentsBackendActive || !runtimeProbesEnabled || !serviceActive
+        || tabProviderIds.length === 0 || pendingBackendRefresh
+        || backendProcess.running || backendProcessKind !== "") return false
+    const command = agentsUpdateCommand(false, false)
+    command.splice(2, 0, "--limits-only")
+    // Suppress the discovery fallback on failure, even though this run only refreshes limits.
+    runningBackendDiscovery = true
+    return startBackendProcess("agents-update", command)
+  }
+
+  function requestPeriodicBackend() {
+    return requestCurrentBackend(false, lastDiscoveryStartedAtMs > 0
+      && Date.now() - lastDiscoveryStartedAtMs >= agentsDiscoveryInterval)
   }
 
   function startBackendProcess(kind, command) {
@@ -629,36 +649,44 @@ Item {
     return startBackendProcess("legacy-detection", legacyDetectionCommand())
   }
 
-  function requestAgentsUpdate(force) {
+  function requestAgentsUpdate(force, discovery) {
     if (!agentsBackendActive || !runtimeProbesEnabled
         || !serviceActive) return false
+    const discover = force === true || discovery !== false || tabProviderIds.length === 0
     if (backendProcess.running || backendProcessKind !== "") {
       pendingBackendRefresh = true
       pendingBackendForce = pendingBackendForce || force === true
+      pendingBackendDiscovery = pendingBackendDiscovery || discover
       return true
     }
-    return startBackendProcess("agents-update", agentsUpdateCommand(force))
+    runningBackendDiscovery = discover
+    const started = startBackendProcess("agents-update", agentsUpdateCommand(force, discover))
+    if (started) startupRefreshPending = false
+    if (started && discover) lastDiscoveryStartedAtMs = Date.now()
+    return started
   }
 
-  function requestCurrentBackend(force) {
+  function requestCurrentBackend(force, discovery) {
     if (!runtimeProbesEnabled || !serviceActive || !anyProviderEnabled)
       return false
     return agentsBackendActive
-      ? requestAgentsUpdate(force === true) : requestLegacyDetection()
+      ? requestAgentsUpdate(force === true, discovery) : requestLegacyDetection()
   }
 
   function reconcileBackendLifecycle(force) {
+    const defer = startupRefreshPending || (agentsBackendActive && startupDiscoveryPending)
     providerSettingsGeneration++
-    agentsUpdateHealthy = false
     pendingBackendRefresh = false
     pendingBackendForce = false
+    pendingBackendDiscovery = false
     if (!runtimeProbesEnabled || !serviceActive || !anyProviderEnabled) {
       if (backendProcess.running) backendProcess.running = false
     } else if (backendProcess.running || backendProcessKind !== "") {
-      pendingBackendRefresh = true
+      pendingBackendRefresh = !defer
       pendingBackendForce = force === true
+      pendingBackendDiscovery = true
       if (backendProcess.running) backendProcess.running = false
-    } else {
+    } else if (!defer) {
       requestCurrentBackend(force === true)
     }
     providerRevision++
@@ -683,24 +711,27 @@ Item {
     const error = backendError
     backendProcessKind = ""
     if (completedKind === "agents-update") {
-      agentsUpdateHealthy = Number(exitCode) === 0
-        && runningSettingsGeneration === providerSettingsGeneration
-        && !pendingBackendRefresh
       if (Number(exitCode) === 66) {
         agentsBackendUnavailable = true
       } else {
-        agentsClaudeFile.reload()
-        agentsCodexFile.reload()
+        if (Number(exitCode) !== 0 && !runningBackendDiscovery) {
+          pendingBackendRefresh = true
+          pendingBackendDiscovery = true
+        }
+        rescanAgents()
       }
       if (Number(exitCode) !== 0 && Number(exitCode) !== 66 && error !== "")
         console.warn("Shibumi AI agents update failed:", error.slice(0, 512))
     }
     providerRevision++
+    if (agentsBackendActive && startupDiscoveryPending && runningSettingsGeneration !== providerSettingsGeneration
+        && !pendingBackendForce) pendingBackendRefresh = false
     if (pendingBackendRefresh) {
-      const force = pendingBackendForce
+      const force = pendingBackendForce, discovery = pendingBackendDiscovery
       pendingBackendRefresh = false
       pendingBackendForce = false
-      if (agentsBackendActive) requestAgentsUpdate(force)
+      pendingBackendDiscovery = false
+      if (agentsBackendActive) requestAgentsUpdate(force, discovery)
       else requestLegacyDetection()
     }
   }
@@ -730,6 +761,34 @@ Item {
   }
 
   Timer {
+    id: startupRefreshTimer
+    interval: root.startupRefreshDelayMs
+    running: root.providerSettingsReady && root.startupRefreshPending
+    repeat: false
+    onTriggered: {
+      root.startupRefreshPending = false
+      const discover = root.tabProviderIds.length === 0
+      if (root.requestCurrentBackend(false, discover) && root.agentsBackendActive && discover)
+        root.startupDiscoveryPending = false
+    }
+  }
+
+  Timer {
+    id: startupDiscoveryTimer
+    interval: root.startupDiscoveryDelayMs
+    running: root.providerSettingsReady && root.startupDiscoveryPending
+    repeat: false
+    onTriggered: {
+      root.startupDiscoveryPending = false
+      const age = Date.now() - root.cachedDiscoveryAtMs
+      if (root.agentsBackendActive && !root.startupProviderEnablementChanged
+          && root.cachedDiscoveryAtMs > 0 && age >= 0 && age < root.agentsDiscoveryInterval)
+        root.lastDiscoveryStartedAtMs = Math.max(root.lastDiscoveryStartedAtMs, root.cachedDiscoveryAtMs)
+      else if (root.agentsBackendActive) root.requestAgentsUpdate(false, true)
+    }
+  }
+
+  Timer {
     id: backendTimer
     interval: root.agentsBackendActive
       ? root.agentsRefreshInterval : 60 * 1000
@@ -738,35 +797,68 @@ Item {
     repeat: true
     onTriggered: {
       root.providerRevision++
-      root.requestCurrentBackend(false)
+      root.requestPeriodicBackend()
     }
   }
 
-  FileView {
-    id: agentsClaudeFile
-    path: root.serviceActive && root.agentsBackendActive
-        && root.providerEnabled("claude")
-      ? root.agentsUsageDir + "/claude.json" : ""
-    watchChanges: root.serviceActive && root.agentsBackendActive
-      && root.providerEnabled("claude")
-    printErrors: false
-    onLoaded: root.applyAgentRecord("claude", text())
-    onFileChanged: reload()
-    onLoadFailed: root.clearAgentRecord("claude")
+  function rescanAgents() {
+    if (!serviceActive || !agentsBackendActive) return
+    if (agentDiscovery.running) { pendingAgentScan = true; return }
+    agentDiscovery.running = true
   }
 
-  FileView {
-    id: agentsCodexFile
-    path: root.serviceActive && root.agentsBackendActive
-        && root.providerEnabled("codex")
-      ? root.agentsUsageDir + "/codex.json" : ""
-    watchChanges: root.serviceActive && root.agentsBackendActive
-      && root.providerEnabled("codex")
-    printErrors: false
-    onLoaded: root.applyAgentRecord("codex", text())
-    onFileChanged: reload()
-    onLoadFailed: root.clearAgentRecord("codex")
+  function reconcileAgentReaders() {
+    if (!providerSettingsReady) return
+    if (serviceActive && agentsBackendActive) rescanAgents()
+    else {
+      pendingAgentScan = false
+      agentDiscovery.running = false
+      agentIds = []
+      agentRecords = ({})
+    }
   }
+
+  Process {
+    id: agentDiscovery
+    command: ["find", root.agentsUsageDir, "-maxdepth", "1", "-name", "*.json", "-printf", "%f\n"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        if (!root.serviceActive || !root.agentsBackendActive) return
+        const ids = text.trim().split("\n").filter(name => /^[a-z0-9][a-z0-9._-]*\.json$/.test(name))
+          .map(name => name.slice(0, -5)).filter(id => id !== "opencode").sort()
+        for (const id of Object.keys(root.agentRecords))
+          if (ids.indexOf(id) < 0) delete root.agentRecords[id]
+        if (JSON.stringify(ids) !== JSON.stringify(root.agentIds)) root.agentIds = ids
+        for (let i = 0; i < agentReaders.count; i++) agentReaders.objectAt(i).reload()
+        root.providerRevision++
+      }
+    }
+    onExited: {
+      if (root.pendingAgentScan) {
+        root.pendingAgentScan = false
+        Qt.callLater(root.rescanAgents)
+      }
+    }
+  }
+
+  Instantiator {
+    id: agentReaders
+    model: root.agentIds
+    delegate: FileView {
+      required property string modelData
+      path: root.serviceActive && root.agentsBackendActive && root.providerEnabled(modelData)
+        ? root.agentsUsageDir + "/" + modelData + ".json" : ""
+      watchChanges: path !== ""
+      printErrors: false
+      onLoaded: root.applyAgentRecord(modelData, text())
+      onFileChanged: reload()
+      onLoadFailed: root.clearAgentRecord(modelData)
+    }
+  }
+
+  onServiceActiveChanged: reconcileAgentReaders()
+  onAgentsBackendActiveChanged: reconcileAgentReaders()
+  onAgentsUsageDirChanged: reconcileAgentReaders()
 
   Loader {
     id: claudeLoader
@@ -813,17 +905,21 @@ Item {
   }
 
   onProviderEnablementSignatureChanged: {
-    if (providerSettingsReady) reconcileBackendLifecycle(true)
+    if (providerSettingsReady) reconcileBackendLifecycle(false)
   }
 
   Component.onCompleted: {
     providerSettingsReady = true
+    reconcileAgentReaders()
     reconcileBackendLifecycle(false)
   }
 
   Component.onDestruction: {
     agentRecordExpiryTimer.stop()
+    startupRefreshTimer.stop()
+    startupDiscoveryTimer.stop()
     backendTimer.stop()
+    agentDiscovery.running = false
     if (backendProcess.running) backendProcess.running = false
   }
 }

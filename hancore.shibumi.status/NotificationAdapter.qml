@@ -1,6 +1,9 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
+import QtQml.Models
+import Quickshell
+import Quickshell.Io
 
 // Compatibility adapter for the host-owned Omarchy Notifications service.
 // The host service owns the notification daemon and all notification objects;
@@ -18,45 +21,123 @@ Item {
   QtObject {
     id: state
     property var hostService: null
-    property bool historyReplayActive: false
-    property var liveKeys: []
-    property var lateLiveRows: []
-    property var dismissedHistoryKeys: []
-    property bool suppressReplay: false
-    property double historyReplayCutoff: 0
-    property double suppressionCutoff: 0
+    property int hostGeneration: 0
+    property real liveRevision: 0
+    function token(entry) { return hostGeneration + ":" + liveRevision + ":" + JSON.stringify(entry) }
+    property var historyReadHost: null
+    property int historyReadGeneration: -1
+    property var queuedHistoryHost: null
+    property int queuedHistoryGeneration: -1
+    property string historyOutput: ""
+    property var jsonHistoryKeys: []
+    property var mutationHost: null
+    property int mutationGeneration: -1
   }
 
+  property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property bool available: state.hostService !== null
   readonly property bool doNotDisturb: available
     && state.hostService.doNotDisturb === true
   readonly property int pendingCount: pendingRows.count
   readonly property int recentCount: pastRows.count
+  property string historyState: "unavailable"
+  readonly property bool liveAvailable: sourceModel() !== null
   readonly property bool historyAvailable: available
-    && (historySourceModel() !== null
-      || typeof state.hostService.showRecentHistory === "function"
-      || typeof state.hostService.showHistory === "function")
-  readonly property bool pastDismissAvailable: available
-    && (typeof state.hostService.dismissPast === "function"
-      || typeof state.hostService.dismissPopup === "function")
+  property string historyLayout: "unknown"
+  readonly property bool pastDismissAvailable: available &&
+    (historyLayout === "json" || typeof state.hostService.dismissPast === "function"
+      || (!historySourceModel() && historyLayout === "directory"))
+  readonly property bool pastClearAvailable: available &&
+    (historyLayout === "json" || (!historySourceModel() && historyLayout === "directory")
+      || typeof state.hostService.clearPast === "function"
+      || typeof state.hostService.clearHistory === "function")
+  readonly property string historyDir: Quickshell.env("HOME")
+    + "/.local/state/omarchy/notifications/history"
+  readonly property string imagesDir: Quickshell.env("HOME")
+    + "/.local/state/omarchy/notifications/images"
   property alias pendingModel: pendingRows
   property alias pastModel: pastRows
 
   ListModel { id: pendingRows }
   ListModel { id: pastRows }
 
+  FileView {
+    id: hiddenHistory
+    path: Quickshell.env("HOME") + "/.local/state/shibumi/notifications/hidden.json"
+    preload: false; printErrors: false
+    atomicWrites: true; blockWrites: true; blockAllReads: true
+    property bool writeFailed: false
+    onSaveFailed: writeFailed = true
+  }
+  function hiddenHistoryKeys() {
+    hiddenHistory.reload()
+    try {
+      const keys = JSON.parse(hiddenHistory.text() || "[]")
+      return Array.isArray(keys) ? Array.from(new Set(keys.filter(key => typeof key === "string" && key))) : []
+    } catch (_error) { return [] }
+  }
+  function hideJsonPast(index) {
+    const keys = hiddenHistoryKeys()
+    const targets = index < 0 ? state.jsonHistoryKeys : [pastRows.get(index).key]
+    for (const key of targets)
+      if (keys.indexOf(key) < 0) keys.push(key)
+    hiddenHistory.writeFailed = false
+    hiddenHistory.setText(JSON.stringify(keys))
+    if (hiddenHistory.writeFailed) return false
+    if (index < 0) pastRows.clear()
+    else pastRows.remove(index)
+    return true
+  }
+
+  // Watch creation/removal and in-place writes, never poll or replay host popups.
+  // Trailing slash keeps FileView's implicit parent inside notifications.
+  readonly property var historyWatchPaths: {
+    const paths = []
+    if (!available || historySourceModel()) return paths
+    paths.push(historyDir, historyDir + ".json", historyDir.slice(0, historyDir.lastIndexOf("/") + 1))
+    for (let index = 0; index < Math.min(10, pastRows.count); index++) {
+      const name = pastRows.get(index).fileName
+      if (validHistoryFileName(name)) paths.push(historyDir + "/" + name)
+    }
+    return paths
+  }
+  Instantiator {
+    model: root.historyWatchPaths
+    delegate: FileView {
+      required property string modelData
+      path: modelData
+      preload: false
+      watchChanges: true
+      onFileChanged: if (!historyRefresh.running) historyRefresh.start()
+    }
+  }
+  Timer {
+    id: historyRefresh
+    interval: 100
+    repeat: false
+    onTriggered: root.showHistory()
+  }
+
   function attachShell(shellValue) {
     const service = shellValue
       && typeof shellValue.firstPartyServiceFor === "function"
       ? shellValue.firstPartyServiceFor("omarchy.notifications") : null
-    state.hostService = service || null
-    state.historyReplayActive = false
-    state.liveKeys = []
-    state.lateLiveRows = []
-    state.dismissedHistoryKeys = []
-    state.suppressReplay = false
-    state.historyReplayCutoff = 0
-    state.suppressionCutoff = 0
+    const nextService = service || null
+    if (state.hostService === nextService) {
+      syncModels()
+      return
+    }
+    historyRefresh.stop()
+    state.hostGeneration++
+    state.hostService = nextService
+    historyLayout = "unknown"
+    historyState = nextService ? "loading" : "unavailable"
+    state.historyOutput = ""
+    state.jsonHistoryKeys = []
+    state.queuedHistoryHost = null
+    state.queuedHistoryGeneration = -1
+    pendingRows.clear()
+    pastRows.clear()
     syncModels()
   }
 
@@ -87,112 +168,96 @@ Item {
       image: String(value.image || ""),
       glyph: String(value.glyph || ""),
       exec: String(value.exec || ""),
-      urgency: Number(value.urgency || 0),
+      execArgv: String(value.execArgv || ""),
+      urgency: typeof value.urgency === "number" ? value.urgency : -1,
       expireTimeout: Number(value.expireTimeout || 0),
-      timestamp: Number(value.timestamp || 0)
+      timestamp: Number(value.timestamp || 0),
+      fileName: String(value.fileName || "")
     }
-  }
-
-  function entryKey(entry) {
-    const value = entry || ({})
-    return String(Number(value.timestamp || 0)) + ":"
-      + String(Number(value.originalId || value.id || 0))
   }
 
   function rebuild(target, model) {
     target.clear()
     if (!model || typeof model.get !== "function") return
-    for (let index = 0; index < model.count; index++) {
+    const limit = target === pastRows ? Math.min(10, model.count) : model.count
+    for (let index = 0; index < limit; index++) {
       const entry = model.get(index)
       if (!entry || Number(entry.originalId || entry.id || 0) < 0)
         continue
-      target.append(primitiveEntry(entry))
-    }
-  }
-
-  function rememberLateLiveRows(model) {
-    if (!state.historyReplayActive || !model
-        || typeof model.get !== "function") return
-    for (let index = 0; index < model.count; index++) {
-      const entry = model.get(index)
-      if (!entry || Number(entry.originalId || entry.id || 0) < 0) continue
-      const key = entryKey(entry)
-      const timestamp = Number(entry.timestamp || 0)
-      if (state.liveKeys.indexOf(key) >= 0
-          || state.historyReplayCutoff <= 0
-          || timestamp < state.historyReplayCutoff
-          || state.lateLiveRows.some(row => entryKey(row) === key)) continue
-      state.lateLiveRows.push(primitiveEntry(entry))
-    }
-  }
-
-  function rebuildReplayModels(model) {
-    pendingRows.clear()
-    pastRows.clear()
-    const lateKeys = []
-    for (const entry of state.lateLiveRows) {
-      lateKeys.push(entryKey(entry))
-      pendingRows.append(entry)
-    }
-    if (!model || typeof model.get !== "function") return
-    for (let index = 0; index < model.count; index++) {
-      const entry = model.get(index)
-      if (!entry || Number(entry.originalId || entry.id || 0) < 0
-          || lateKeys.indexOf(entryKey(entry)) >= 0
-          || state.dismissedHistoryKeys.indexOf(entryKey(entry)) >= 0)
-        continue
-      const timestamp = Number(entry.timestamp || 0)
-      const isNewLive = state.historyReplayCutoff > 0
-        && timestamp >= state.historyReplayCutoff
-      const target = state.liveKeys.indexOf(entryKey(entry)) >= 0 || isNewLive
-        ? pendingRows : pastRows
-      target.append(primitiveEntry(entry))
-    }
-  }
-
-  function rebuildSuppressedModels(model) {
-    pendingRows.clear()
-    pastRows.clear()
-    if (!model || typeof model.get !== "function") return
-    for (let index = 0; index < model.count; index++) {
-      const entry = model.get(index)
-      if (!entry || Number(entry.originalId || entry.id || 0) < 0) continue
-      if (Number(entry.timestamp || 0) >= state.suppressionCutoff)
-        pendingRows.append(primitiveEntry(entry))
+      const copy = primitiveEntry(entry)
+      if (target === pendingRows) copy.liveToken = state.token(copy)
+      target.append(copy)
     }
   }
 
   function syncModels() {
-    const current = sourceModel()
+    state.liveRevision++
+    rebuild(pendingRows, sourceModel())
     const archived = historySourceModel()
-    rememberLateLiveRows(current)
-    if (state.suppressReplay && !archived)
-      rebuildSuppressedModels(current)
-    else if (state.historyReplayActive && !archived)
-      rebuildReplayModels(current)
-    else {
-      rebuild(pendingRows, current)
-      // The current host intentionally exposes only live popupModel rows. Its
-      // history is available through showRecentHistory(), not as a public
-      // model; keep the recent model empty until that action is requested.
+    if (archived) {
       rebuild(pastRows, archived)
-    }
+      historyState = "ready"
+    } else if (available && !historyRefresh.running) historyRefresh.start()
   }
 
-  function removeBufferedEntry(entry) {
-    const key = entryKey(entry)
-    let removed = false
-    for (let index = state.lateLiveRows.length - 1; index >= 0; index--) {
-      if (entryKey(state.lateLiveRows[index]) !== key) continue
-      state.lateLiveRows.splice(index, 1)
-      removed = true
+  // Derived from MIT-licensed Omarchy v4.0.3 NotificationLogic.historyRows:
+  // compact JSON lines, newest first, malformed lines skipped, at most ten.
+  function validHistoryFileName(value) {
+    return typeof value === "string" && value.length > 5
+      && value.endsWith(".json") && value.indexOf("/") < 0
+      && value.indexOf("\\") < 0 && !/[\x00-\x1f\x7f]/.test(value)
+  }
+  function applyHistory(raw) {
+    const rows = []
+    const lines = String(raw || "").split("\n")
+    const prefix = historyDir + "/"
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index], separator = line.indexOf("\t")
+      if (separator < 0 || !line.startsWith(prefix)) continue
+      const fileName = line.slice(prefix.length, separator)
+      if (!validHistoryFileName(fileName)) continue
+      try {
+        const value = JSON.parse(line.slice(separator + 1))
+        if (value && typeof value === "object") {
+          value.fileName = fileName
+          rows.push(primitiveEntry(value))
+        }
+      } catch (_error) {
+        // Match the host: one malformed persisted line does not hide the rest.
+      }
     }
-    for (let index = state.liveKeys.length - 1; index >= 0; index--) {
-      if (state.liveKeys[index] !== key) continue
-      state.liveKeys.splice(index, 1)
-      removed = true
-    }
-    return removed
+    rows.sort((a, b) => b.timestamp - a.timestamp)
+    pastRows.clear()
+    for (let index = 0; index < Math.min(10, rows.length); index++)
+      pastRows.append(rows[index])
+  }
+
+  // Store.js history.json is already newest-closed first, including silenced
+  // rows. Keep that order (ts is arrival time), and never import click commands.
+  function applyJsonHistory(raw) {
+    try {
+      const values = JSON.parse(raw)
+      if (!Array.isArray(values)) return false
+      const hidden = hiddenHistoryKeys(), present = []
+      const rows = []
+      for (const value of values) {
+        if (!value || typeof value.key !== "string" || !value.key
+            || typeof value.ts !== "number" || !isFinite(value.ts)
+            || typeof value.closed_ts !== "number" || !isFinite(value.closed_ts)) return false
+        present.push(value.key)
+        const row = primitiveEntry(value)
+        row.key = value.key
+        row.timestamp = value.ts * 1000
+        row.fileName = row.image = row.exec = row.execArgv = ""
+        if (hidden.indexOf(value.key) < 0 && rows.length < 10) rows.push(row)
+      }
+      state.jsonHistoryKeys = present
+      const retained = hidden.filter(key => present.indexOf(key) >= 0)
+      if (retained.length !== hidden.length) hiddenHistory.setText(JSON.stringify(retained))
+      pastRows.clear()
+      for (const row of rows) pastRows.append(row)
+      return true
+    } catch (_error) { return false }
   }
 
   function sourceIndex(entry, model) {
@@ -210,6 +275,23 @@ Item {
     return -1
   }
 
+  function invokeLive(token) {
+    const service = state.hostService, revision = state.liveRevision
+    const model = service ? service.popupModel : null
+    if (!token || !model || model !== sourceModel()
+        || typeof service.invokePopupDefault !== "function") return false
+    let match = -1
+    for (let index = 0; index < model.count; index++) {
+      const row = primitiveEntry(model.get(index))
+      if (row.originalId <= 0 || !isFinite(row.timestamp) || row.timestamp <= 0
+          || state.token(row) !== token) continue
+      if (match >= 0) return false
+      match = index
+    }
+    if (match < 0 || revision !== state.liveRevision || service !== state.hostService) return false
+    try { return service.invokePopupDefault(match) !== false } catch (_error) { return false }
+  }
+
   function setDoNotDisturb(value) {
     const service = state.hostService
     if (!service) return false
@@ -224,10 +306,6 @@ Item {
     return false
   }
 
-  function toggleDoNotDisturb() {
-    return setDoNotDisturb(!doNotDisturb)
-  }
-
   function dismissPending(index) {
     const service = state.hostService
     if (!service || index < 0 || index >= pendingRows.count) return false
@@ -236,13 +314,8 @@ Item {
       return true
     }
     const entry = pendingRows.get(index)
-    const buffered = removeBufferedEntry(entry)
     const source = sourceIndex(entry, sourceModel())
-    if (source < 0) {
-      if (!buffered) return false
-      syncModels()
-      return true
-    }
+    if (source < 0) return false
     if (typeof service.dismissPopup !== "function") return false
     service.dismissPopup(source)
     return true
@@ -250,18 +323,17 @@ Item {
 
   function dismissPast(index) {
     const service = state.hostService
-    if (!service || index < 0 || index >= pastRows.count) return false
-    const entry = pastRows.get(index)
-    const key = entryKey(entry)
+    if (!pastDismissAvailable || index < 0 || index >= pastRows.count) return false
+    if (historyLayout === "json") return hideJsonPast(index)
     if (typeof service.dismissPast === "function") {
       service.dismissPast(index)
       return true
     }
-    const source = sourceIndex(entry, sourceModel())
-    if (source < 0 || typeof service.dismissPopup !== "function") return false
-    state.dismissedHistoryKeys = state.dismissedHistoryKeys.concat([key])
-    service.dismissPopup(source)
-    return true
+    const fileName = String(pastRows.get(index).fileName || "")
+    if (historyLayout !== "directory" || historySourceModel() || !validHistoryFileName(fileName)) return false
+    return startHistoryMutation(["bash", "-c",
+      "[ ! -e \"$1.json\" ] && [ ! -L \"$1.json\" ] && rm -f \"$1/$3\" \"$2/$4\"-*", "--", historyDir, imagesDir,
+      fileName, fileName.slice(0, -5)])
   }
 
   function clearPending() {
@@ -277,14 +349,6 @@ Item {
     }
     if (typeof service.clearPopups === "function") {
       service.clearPopups()
-      state.liveKeys = []
-      state.lateLiveRows = []
-      state.dismissedHistoryKeys = []
-      state.historyReplayActive = false
-      state.suppressReplay = true
-      state.historyReplayCutoff = 0
-      state.suppressionCutoff = Date.now()
-      syncModels()
       return true
     }
     return false
@@ -292,7 +356,8 @@ Item {
 
   function clearPast() {
     const service = state.hostService
-    if (!service) return false
+    if (!pastClearAvailable) return false
+    if (historyLayout === "json") return hideJsonPast(-1)
     if (typeof service.clearPast === "function") {
       service.clearPast()
       return true
@@ -301,9 +366,23 @@ Item {
       service.clearHistory()
       return true
     }
-    return false
+    if (historyLayout !== "directory" || historySourceModel()) return false
+    return startHistoryMutation(["bash", "-c",
+      "[ ! -e \"$1.json\" ] && [ ! -L \"$1.json\" ] || exit 1; "
+      + "for f in \"$1\"/*.json; do\n  [[ -e $f ]] || continue\n"
+      + "  stale=\"${f##*/}\"\n  rm -f \"$f\" \"$2/${stale%.json}\"-*\n"
+      + "done", "--", historyDir, imagesDir])
   }
 
+  function startHistoryMutation(command) {
+    if (!state.hostService || historyLayout !== "directory"
+        || historySourceModel() || mutationProcess.running) return false
+    state.mutationHost = state.hostService
+    state.mutationGeneration = state.hostGeneration
+    mutationProcess.command = command
+    mutationProcess.running = true
+    return true
+  }
   function markAllSeen() {
     const service = state.hostService
     if (!service) return false
@@ -314,12 +393,20 @@ Item {
     return clearPending()
   }
 
-  function focusApp(entry) {
+  function focusApp(entry, focusOnly) {
     const service = state.hostService
     if (!service || !entry) return false
     if (typeof service.focusApp === "function") {
       service.focusApp(entry)
       return true
+    }
+    if (focusOnly === true) {
+      const app = typeof entry.app === "string" ? entry.app.trim() : ""
+      if (!app || /[\x00-\x1f\x7f]/.test(entry.app)
+          || !omarchyPath.startsWith("/") || focusProcess.running) return false
+      focusProcess.command = [omarchyPath + "/bin/omarchy-hyprland-focus-app", app]
+      focusProcess.running = true
+      return true // Request accepted, not confirmation of a focused window.
     }
     const source = sourceIndex(entry, sourceModel())
     if (source < 0 || typeof service.invokePopupDefault !== "function")
@@ -328,47 +415,86 @@ Item {
     return true
   }
 
+  function startHistoryRead() {
+    historyState = "loading"
+    state.historyOutput = ""
+    state.historyReadHost = state.hostService
+    state.historyReadGeneration = state.hostGeneration
+    historyReader.running = true
+  }
+
+  function startQueuedHistoryRead() {
+    if (historyReader.running
+        || state.queuedHistoryHost !== state.hostService
+        || state.queuedHistoryGeneration !== state.hostGeneration) return
+    state.queuedHistoryHost = null
+    state.queuedHistoryGeneration = -1
+    startHistoryRead()
+  }
+
   function showHistory() {
-    const service = state.hostService
-    if (!service) return false
-    const archived = historySourceModel()
-    if (archived) {
+    if (!state.hostService) return false
+    if (historySourceModel()) {
       syncModels()
       return true
     }
+    if (historyReader.running) {
+      state.queuedHistoryHost = state.hostService
+      state.queuedHistoryGeneration = state.hostGeneration
+    } else startHistoryRead()
+    return true
+  }
 
-    const current = sourceModel()
-    state.liveKeys = []
-    state.lateLiveRows = []
-    state.dismissedHistoryKeys = []
-    if (state.historyReplayActive) {
-      for (let index = 0; index < pendingRows.count; index++)
-        state.liveKeys.push(entryKey(pendingRows.get(index)))
-    } else if (current && typeof current.get === "function") {
-      for (let index = 0; index < current.count; index++)
-        state.liveKeys.push(entryKey(current.get(index)))
+  Process { id: focusProcess }
+  Process {
+    id: mutationProcess
+    onExited: function(exitCode, _exitStatus) {
+      const current = state.hostService === state.mutationHost
+        && state.hostGeneration === state.mutationGeneration
+      state.mutationHost = null
+      state.mutationGeneration = -1
+      if (current && exitCode === 0) root.showHistory()
     }
-    state.suppressReplay = false
-    state.suppressionCutoff = 0
-    state.historyReplayCutoff = Date.now()
-    state.historyReplayActive = true
-    syncModels()
-    if (typeof service.showRecentHistory === "function") {
-      service.showRecentHistory()
-      return true
+  }
+  Process {
+    id: historyReader
+    command: ["timeout", "--foreground", "--kill-after=1", "2", "sh", "-c",
+      // JSON wins over migration leftovers, even on read/parse failure. Once
+      // observed, keep it for this attachment if the file temporarily vanishes.
+      "dir=$1; if [ \"$2\" = json ] || [ -e \"$dir.json\" ] || [ -L \"$dir.json\" ]; then "
+      + "printf 'json\\n'; exec cat -- \"$dir.json\"; fi; "
+      + "printf 'directory\\n'; set -- \"$dir\"/*.json; "
+      + "if [ -d \"$dir\" ] && [ -r \"$dir\" ] && [ -x \"$dir\" ] && [ ! -e \"$1\" ]; then exit 0; fi; "
+      + "exec awk '{ print FILENAME \"\\t\" $0 }' \"$@\"", "--", historyDir, root.historyLayout]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: state.historyOutput = text
     }
-    if (typeof service.showHistory === "function") {
-      service.showHistory()
-      return true
+    stderr: StdioCollector { waitForEnd: true }
+    onRunningChanged: if (!running)
+      Qt.callLater(root.startQueuedHistoryRead)
+    onExited: function(exitCode, _exitStatus) {
+      const current = state.hostService === state.historyReadHost
+        && state.hostGeneration === state.historyReadGeneration
+      state.historyReadHost = null
+      state.historyReadGeneration = -1
+      if (current && !root.historySourceModel()) {
+        const separator = state.historyOutput.indexOf("\n")
+        root.historyLayout = state.historyOutput.slice(0, separator)
+        const body = state.historyOutput.slice(separator + 1)
+        let ready = exitCode === 0
+        if (root.historyLayout === "json") ready = ready && root.applyJsonHistory(body)
+        else root.applyHistory(ready ? body : "")
+        if (!ready) pastRows.clear()
+        root.historyState = ready ? "ready" : "unavailable"
+      }
     }
-    state.historyReplayActive = false
-    syncModels()
-    return false
   }
 
   Connections {
     target: root.sourceModel()
     ignoreUnknownSignals: true
+    function onRowsMoved() { root.syncModels() }
     function onRowsInserted() { root.syncModels() }
     function onRowsRemoved() { root.syncModels() }
     function onDataChanged() { root.syncModels() }

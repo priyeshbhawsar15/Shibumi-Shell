@@ -20,7 +20,12 @@ OMARCHY_PATH=/usr/share/omarchy ./tests/bar-host-registry-regression.sh
 `tests/test_widget_settings.py` proves a widget receives array settings as real
 arrays after they pass through a Repeater's `modelData`.
 
-The bar-host regression also exercises the process-singleton `omarchy.bar`
+The bar-host regression drives `entry.enabled=false` and unloads a private Bar
+Loader before a host-registry update. It verifies that real `WidgetSlot`
+residents revoke their Bar connection first, retain owner sentinels until item
+destruction, and attach to a replacement Bar without invalid-context or
+JavaScript diagnostics. It also exercises the
+process-singleton `omarchy.bar`
 visibility nudge in an isolated HOME, proving both host-owned marker directions,
 delayed admission behind an outgoing stock handler, synchronous revocation
 before stock takeover, and rejection of duplicate target registration.
@@ -48,16 +53,16 @@ baseline jobs. The installed-package job defaults to the package-managed host:
 ```
 
 The installed-source-parity job requires an explicit clean Git checkout of the
-official `v4.0.3` source revision used by the installed package:
+official `v4.0.6` source revision used by the installed package:
 
 ```bash
-SHIBUMI_INSTALLED_SOURCE_OMARCHY_PATH=/path/to/omarchy-v4.0.3 \
+SHIBUMI_INSTALLED_SOURCE_OMARCHY_PATH=/path/to/omarchy-v4.0.6 \
   ./tests/omarchy-installed-source-parity-contract-regression.sh
 ```
 
-For an additional 4.0.2 compatibility run, invoke the aggregate contract with
-the historical selector and its exact checkout. Release jobs themselves pin
-4.0.3 and never inherit this selector:
+Historical 4.0.2 compatibility requires its recorded Quickshell package as well
+as the exact source checkout. The following historical command is not a current
+validation-host gate. Release jobs pin 4.0.6 and never inherit this selector:
 
 ```bash
 OMARCHY_PATH=/path/to/omarchy-v4.0.2 \
@@ -70,7 +75,7 @@ The forward-compat job separately requires the immutable upstream snapshot used
 by the engineering audit:
 
 ```bash
-SHIBUMI_FORWARD_COMPAT_OMARCHY_PATH=/path/to/omarchy-forward-compat-ed7bae4a \
+SHIBUMI_FORWARD_COMPAT_OMARCHY_PATH=/path/to/omarchy-forward-compat-551dc629 \
   ./tests/omarchy-forward-compat-contract-regression.sh
 ```
 
@@ -89,14 +94,30 @@ Every host-bound test both imports `tests/lib/baselines.sh` and invokes its
 loader. The complete-host jobs select three repository-owned manifests with
 non-overlapping claims; the Agents job selects its separate narrower manifest:
 
-- `contracts/baselines/omarchy-installed-package-v4.0.3.json` validates the
-  package-managed `omarchy 4.0.3-1`, `omarchy-settings 4.0.3-1` layout;
-- `contracts/baselines/omarchy-installed-source-parity-v4.0.3.json` proves that
-  the official `v4.0.3` source form satisfies the same complete suite;
-- the corresponding 4.0.2 manifests remain immutable optional compatibility
-  baselines selected only with `SHIBUMI_OMARCHY_BASELINE_VERSION=4.0.2`;
-- `contracts/baselines/omarchy-forward-compat-ed7bae4a.json` proves forward
-  compatibility with the recorded upstream snapshot.
+- `contracts/baselines/omarchy-installed-package-v4.5.0.json` binds the
+  package-managed `omarchy 4.5.0-3`, `omarchy-settings 4.5.0-3` layout;
+- `contracts/baselines/omarchy-installed-source-parity-v4.5.0.json` binds the
+  official `v4.5.0` source form at `ac2690cd7be4f47e4a255f5e2e78d904d436b068`;
+- 4.0.6/4.0.4 package/source and 4.0.5 source manifests remain historical. The native
+  catalog resource/runtime source remains 4.0.4 (`c668141e`, 183 shell files).
+  Supply `SHIBUMI_NATIVE_CATALOG_OMARCHY_PATH=/path/to/omarchy-v4.0.4` for the
+  resource gate; explicit `--native-shell` inputs to native runtime/fallback
+  fixtures retain the same pin. This fourth collector input does not assert the
+  historical manifest's old Quickshell package on the current host;
+- the `contracts/baselines/omarchy-installed-package-v4.0.3.json` and
+  `contracts/baselines/omarchy-installed-source-parity-v4.0.3.json` manifests
+  remain immutable optional compatibility references alongside 4.0.2; choose
+  a historical manifest with `SHIBUMI_OMARCHY_BASELINE_VERSION=4.0.3` or
+  `SHIBUMI_OMARCHY_BASELINE_VERSION=4.0.2`;
+- `contracts/baselines/omarchy-forward-compat-551dc629.json` records
+  `551dc62969046709e7c6176dbdbccacce580a487` for the separate forward gate.
+  Its active Quickshell provenance is the independently verified Omarchy-repository
+  `0.3.2.r7.g2b4501a-1` package, also required for 4.0.6 package/parity gates;
+  historical Arch `0.3.1-1` and edge-host `0.3.2-6` results remain separate.
+  Six native layout sections must remain distinct from three presentation regions.
+  Use the existing State/lifecycle and inline-delta fixtures; tray data is deferred,
+  not dropped. The stable 37-step bar-switch and 140-case renderer rest checks,
+  plus N3 bar-switch/focus measurements versus Beta.16.4, remain required.
 
 All three manifests bind the complete consumed `shell`, `bin`, and `config`
 subtrees by entry count, path inventory, entry type, executable state, symlink
@@ -234,6 +255,30 @@ without deriving owner readiness from its own allocated width.
 It uses no desktop screenshot or physical layer surface; real Top/Bottom ghost
 and mixed-scale acceptance remain separate.
 
+## Shared shell fixture helpers
+
+`tests/lib/host-diagnostics.txt` holds only the common missing-Hyprland-signature
+startup line and two byte-identical full Deny expressions. Shell callers source
+`host-diagnostics.sh`; substring versus whole-line matching, case sensitivity,
+additional diagnostics and exceptions remain local. Socket and module-path
+warnings are not universally accepted. Quick Access's intentional action and
+negative-control binding warnings never enter the common allowance.
+
+`qs_run_fixture <fixture.qml> <workdir> [timeout]` in `tests/lib/qs-runner.sh`
+stages missing pinned Commons/Ui trees without replacing existing fixture stubs.
+Callers supply the whole fixture environment through the required `qs_fixture_env`
+array (`-i` clears the inherited one); the runner adds nothing.
+`qs_fixture_args` preserves CLI arguments. The synchronous helper
+uses `isolated_process.py` for bounded capture, deadline and owned-group cleanup;
+it preserves captured bytes in `qs-runner.log`, including timeout/error exits, and
+writes runner diagnostics to `qs-runner-error.log`. `qs-runner-survivors` records
+live descendants before the cleanup kill; Panel Geometry requires zero, and the
+shared cleanup verifies no live members remain before reaping its reserved leader.
+The combined output limit is 4 MiB; exceeding it exits 125 with the bounded prefix.
+A descendant holding stdout open keeps capture waiting until the deadline.
+The caller removes its workdir.
+QML, qmltestrunner, Python and nested-Wayland runners keep their existing policies.
+
 ## Asynchronous Control Center restoration
 
 `tests/bar-host-registry-regression.sh` exercises the actual Bar restoration
@@ -249,12 +294,13 @@ handoff, and cancellation/rescheduling from a panel-open callback.
 python3 tests/state-restore-control-regression.py
 ```
 
-Ten narrowly calibrated mutations alter only the private staged Bar: incomplete
+Sixteen narrowly calibrated mutations alter only the private staged Bar: incomplete
 navigation rollback, duplicate output enrollment, missing admission revocation,
 missed synchronous settlement, rejected-existing changes, expired retry windows,
 premature pending-window consumption, premature native-publication-window
-consumption, false-success settlement and timer-snapshot replay. Positives run
-before and after the mutants;
+consumption, false-success settlement, timer-snapshot replay, same-owner veto,
+the two page-readiness gates, copied-record pruning, revision pruning and
+output-local pruning. Positives run before and after the mutants;
 each negative needs a nonzero exit and its intended diagnostic, without unrelated
 runtime errors. These objects simulate output identities; they prove no physical
 screen, keyboard focus, rendering or full-Bar handoff behavior.
@@ -547,7 +593,10 @@ An active malformed `busy` value cannot override an exact accepted-operation dra
 throwing cancellation remains revoked and cannot strand pre-start bookkeeping.
 
 The transport leaf has inert output/error/exit/timeout/descendant controls at all
-byte limits. A separate two-instance regression starts older and newer isolated
+byte limits. Its manifest cases cover registry-compatible development-directory
+symlinks and per-row metadata degradation, while native identity/IPC/limit
+refusals remain fail-closed. The Control Center fixture distinguishes a refused
+catalog from an empty filter using the existing text surface. A separate two-instance regression starts older and newer isolated
 shells at one path: path-only IPC demonstrates the ambiguity, while the production
 helper must return the DTO owned by each exact PID. A separate QML fixture executes actual NativeCatalog, QProcess and
 helper/custodian code, replacing **only** the IPC leaf with an inert process tree.
@@ -605,17 +654,17 @@ python3 tests/source-snapshot-regression.py
 python3 tests/isolated-files-regression.py
 python3 tests/isolated-resource-regression.py
 python3 tests/native-runtime-regression.py \
-  --native-shell /path/to/omarchy-v4.0.3/shell
+  --native-shell /path/to/omarchy-v4.0.4/shell
 python3 tests/native-catalog-fallback-regression.py \
-  --native-shell /path/to/omarchy-v4.0.3/shell
+  --native-shell /path/to/omarchy-v4.0.4/shell
 python3 tests/native-catalog-resource-regression.py \
-  --native-shell /path/to/omarchy-v4.0.3/shell
+  --native-shell /path/to/omarchy-v4.0.4/shell
 python3 tests/all24-scoped-service-regression.py \
-  --native-shell /path/to/omarchy-v4.0.3/shell
+  --native-shell /path/to/omarchy-v4.0.4/shell
 ```
 
 The runner admits exactly 183 regular files from commit
-`0534987009061cbe2dacdde4ad564092ab698d12`, with the whole source inventory bound
+`c668141e9c42b13c80c9ca4ea108e11708c5e8a5`, with the whole source inventory bound
 to SHA256 `2cd0ffb0c38f31868e28c3556f0efc530f4fcd04765856ec157bc070eac748a0`.
 Its inventory serialization is specified beside the constant. Symlinks,
 nonregular nodes, extra/missing/drifted bytes and unbound empty directories refuse
@@ -703,6 +752,10 @@ start. Fixed Shibumi groups use the State-only channel. A catalog-only Audio
 provider covers serialized V1/V2 replacement, return to Shibumi, exact undo and
 stale-postimage refusal without relying on a preloaded component. These are
 isolated native-host flows, not rendered desktop or physical-output evidence.
+The B(b) fixture fills the five extras but leaves reusable base slots: following
+`ARCHITECTURE.md`'s allocation contract, it expects the native widget in `left[0]`,
+then swaps it to the extra when G1 returns. This is base-slot reuse and persistence
+coverage, not exhausted-capacity warning coverage.
 
 `tests/state-storage-regression.py` isolates the actual controller with an explicit
 own-entry writer and private configuration files. It exercises debounce, in-flight

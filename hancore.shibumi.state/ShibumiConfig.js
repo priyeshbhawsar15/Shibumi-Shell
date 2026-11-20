@@ -47,6 +47,7 @@ function defaultSplits(orderValue) {
   var order = normalizedOrder(orderValue) || defaultOrder()
   return {
     left: Array(Math.max(0, order.left.length - 1)).fill(false),
+    center: Array(Math.max(0, order.center.length - 1)).fill(false),
     boundaries: [false, false],
     right: Array(Math.max(0, order.right.length - 1)).fill(false)
   }
@@ -203,13 +204,24 @@ function normalizedOrder(value) {
     seen[id] = true
     if (V1GroupIds.indexOf(id) >= 0) fixedCount++
   }
+  var parked = value.parked === undefined ? [] : value.parked
+  if (!Array.isArray(parked) || parked.length > V1GroupIds.length) return null
+  for (var p = 0; p < parked.length; p++) {
+    var group = parked[p]
+    if (typeof group !== "string" || V1GroupIds.indexOf(group) < 0 || seen[group])
+      return null
+    seen[group] = true
+    fixedCount++
+  }
   if (fixedCount !== V1GroupIds.length) return null
 
-  return {
+  var result = {
     left: value.left.slice(),
     center: value.center.slice(),
     right: value.right.slice()
   }
+  if (parked.length) result.parked = parked.slice()
+  return result
 }
 
 function normalizedV1SlotRoles(value, orderValue) {
@@ -269,10 +281,13 @@ function normalizedSplits(value, orderValue) {
   var order = normalizedOrder(orderValue)
   if (!isPlainObject(value) || !order) return null
   var left = boolArray(value.left, Math.max(0, order.left.length - 1))
+  var center = Object.prototype.hasOwnProperty.call(value, "center")
+    ? boolArray(value.center, Math.max(0, order.center.length - 1))
+    : Array(Math.max(0, order.center.length - 1)).fill(false)
   var boundaries = boolArray(value.boundaries, 2)
   var right = boolArray(value.right, Math.max(0, order.right.length - 1))
-  if (!left || !boundaries || !right) return null
-  return { left: left, boundaries: boundaries, right: right }
+  if (!left || !center || !boundaries || !right) return null
+  return { left: left, center: center, boundaries: boundaries, right: right }
 }
 
 function safeScalar(value) {
@@ -383,21 +398,6 @@ function normalizePresentation(value) {
     result.v2ShellStyle = String(value.v2ShellStyle)
   else if (v2Styles.indexOf(result.shellStyle) !== -1)
     result.v2ShellStyle = result.shellStyle
-  return result
-}
-
-function normalizedDesktopIds(value) {
-  if (!Array.isArray(value)) return []
-  var result = []
-  var seen = {}
-  for (var i = 0; i < value.length && result.length < 128; i++) {
-    var id = String(value[i] || "").trim()
-    if (id.slice(-8).toLowerCase() === ".desktop") id = id.slice(0, -8)
-    var key = "$" + id
-    if (!id || id.length > 255 || /[\x00-\x1f\x7f/\\]/.test(id) || seen[key]) continue
-    seen[key] = true
-    result.push(id)
-  }
   return result
 }
 

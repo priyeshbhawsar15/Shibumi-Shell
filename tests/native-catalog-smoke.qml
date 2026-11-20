@@ -34,6 +34,8 @@ Scope {
       }
     }
   }
+  Component { id: catalogFactory
+    Catalog.NativeCatalog { admitted: false; sourceToken: null; shellDirectory: ""; Component.onDestruction: schedule() } }
   QtObject { id: firstOwner }
   QtObject { id: secondOwner }
   QtObject { id: incomplete }
@@ -121,6 +123,8 @@ Scope {
     assert(!("installedPlugins" in parsed) && !Model.entry(parsed, "constructor"), "fabricated registry or inherited entry")
     assert(JSON.stringify(Model.ancestry(parsed, "user.audio")) === '["user.audio","omarchy.audio"]', "ancestry failed")
     assert(Model.parse("[]") !== null, "empty ready catalog refused")
+    for (var section of ["centerBegin", "centerEnd", "tray"])
+      assert(!bad(function(r) { r.barWidget.defaultSection = section }), "native section metadata refused")
     assert(bad(function(_, a) { a.push(a[0]) }), "duplicate catalog admitted")
     for (var flag of ["enabled", "active", "canDisable", "firstParty"])
       assert(bad(function(r) { r[flag] = 1 }), "numeric Boolean admitted")
@@ -455,6 +459,12 @@ Scope {
         root.assert(catalog.ready, "throwing backend recovery failed")
         catalog.demand = false
         root.assert(!catalog.requestRefresh(), "inactive refresh accepted")
+        root.dyingBackend = catalogFactory.createObject(catalog)
+        root.dyingBackend.schedule()
+        root.dyingBackend.destroy()
+        root.stage = 46; break
+      case 46:
+        root.assert(!Qt.isQtObject(root.dyingBackend), "catalog teardown did not complete")
         console.log("native catalog parsing/lifetime passed; no family or desktop acceptance")
         Qt.quit()
       }

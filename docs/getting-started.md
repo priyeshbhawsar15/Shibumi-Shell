@@ -41,8 +41,9 @@ The Control Center exposes the supported product settings:
 - switch between the V1 and V2-derived shell styles;
 - place the bar at the top or bottom and select its shell shape;
 - choose a semantic accent from the active Omarchy theme;
-- configure V1 border, frost, shadow, and Radius 12/6 or the V2 bar and
-  panel/tooltip borders;
+- configure V1 border, shadow, and Radius 12/6 or the V2 Bar border and
+  Panels (including tooltip borders);
+- enable Frost transparency in V1 and V2 Notch;
 - choose workspace presentation and picker style;
 - set per-widget presentation and enabled state; and
 - rearrange widgets and control split or separator boundaries.
@@ -61,15 +62,13 @@ hashes, and transaction recovery data live separately in the XDG state directory
 Use the Control Center for normal changes. Read [configuration](configuration.md)
 before editing JSON or suite state by hand.
 
-## Know the beta boundary
+## Know the release boundary
 
-Version `0.1.1-beta.13` is a published GitHub prerelease. Its exact package
-payload and complete package lifecycle passed, including physical V1/V2,
-stock-bar return, style, and top/bottom acceptance on single-output Omarchy
-4.0.3. The validation machine exposed only `eDP-1`, so this is not multi-output
-acceptance. AUR publication remains deferred. Shibumi supports Omarchy Quattro
-only. The pinned source contracts and accepted host evidence are recorded in the
-[Shibumi host compatibility record](architecture/quattro-compatibility.md).
+Shibumi 0.2.5 is the current stable release and focuses on stabilization. It supports Omarchy
+Quattro with horizontal Top and Bottom bars. "0.x" means APIs may still change between
+releases, not that a release is a prerelease. Use tagged releases and the documented update
+and recovery route. Pinned source stack: Omarchy 4.5.0, Quickshell 0.3.2, Qt 6.12; forward
+reference 551dc629. Historical physical acceptance is single-output, not a live 4.5.0 pass.
 
 Read [release readiness](release-readiness.md) for the current evidence and
 open gates. Use [troubleshooting](development/troubleshooting.md) if the bar,

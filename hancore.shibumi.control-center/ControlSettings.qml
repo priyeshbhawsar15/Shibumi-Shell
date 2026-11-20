@@ -97,29 +97,20 @@ Item {
     })
     return values.concat(plugins)
   }
+  readonly property var healthPrimaryChecks: Array.isArray(
+    controller.healthPrimaryChecks) ? controller.healthPrimaryChecks : []
   readonly property int healthErrorCount: {
-    const report = controller && controller.healthReport
-      ? controller.healthReport : ({ checks: [] })
-    const checks = Array.isArray(report.checks) ? report.checks : []
-    const errors = checks.filter(function(check) {
+    const errors = healthPrimaryChecks.filter(function(check) {
       return String(check.status || "") === "error"
     }).length
     return errors > 0 ? errors
       : String(controller.healthFailure || "") !== "" ? 1 : 0
   }
-  readonly property int healthWarningCount: {
-    const report = controller && controller.healthReport
-      ? controller.healthReport : ({ checks: [] })
-    const checks = Array.isArray(report.checks) ? report.checks : []
-    return checks.filter(function(check) {
+  readonly property int healthWarningCount:
+    healthPrimaryChecks.filter(function(check) {
       return String(check.status || "") === "warning"
     }).length
-  }
-  readonly property bool healthChecked: {
-    const report = controller && controller.healthReport
-      ? controller.healthReport : ({ checks: [] })
-    return Array.isArray(report.checks) && report.checks.length > 0
-  }
+  readonly property bool healthChecked: healthPrimaryChecks.length > 0
   readonly property bool healthPassed: healthChecked
     && healthErrorCount === 0 && healthWarningCount === 0
   readonly property color healthErrorColor:
@@ -175,9 +166,10 @@ Item {
     && configureDetailPage === "health"
     && settingsQuery.trim() === ""
     && pageLoader.item !== null
+  // Short reports must not shrink away the left navigation's Health route.
   readonly property real compactHealthPanelHeight:
     configureDetailPanelChromeHeight
-    + Math.max(1, Number(pageLoader.item
+    + Math.max(1, configureLanding.implicitHeight, Number(pageLoader.item
       ? pageLoader.item.implicitHeight : 1))
   readonly property bool compactPickersPage:
     currentPage === "configure"
@@ -240,8 +232,6 @@ Item {
         ? searchPage : pageLoader.item
   readonly property bool fitsWidth: implicitWidth <= width + 0.5
   readonly property var settingsSearchSuggestions: settingsSearch.suggestions
-  readonly property int activeSettingsSearchSuggestion:
-    settingsSearch.activeSuggestionIndex
   readonly property var settingsSearchResults: searchPage.results
   readonly property var filteredPlugins: {
     const needle = query.trim().toLowerCase()
@@ -414,6 +404,10 @@ Item {
     return dismissed
   }
 
+  function focusPaletteInput() {
+    if (paletteLoader.item) paletteLoader.item.focusInput()
+  }
+
   function openWidgetPicker() {
     if (returnOnly) return false
     query = ""
@@ -423,7 +417,7 @@ Item {
     installConfirmed = false
     installStatus = ""
     paletteOpen = true
-    Qt.callLater(function() { paletteSearch.forceActiveFocus() })
+    Qt.callLater(root.focusPaletteInput)
     return true
   }
 
@@ -436,7 +430,7 @@ Item {
     installConfirmed = false
     installStatus = ""
     paletteOpen = true
-    Qt.callLater(function() { installInput.forceActiveFocus() })
+    Qt.callLater(root.focusPaletteInput)
     return true
   }
 
@@ -455,7 +449,7 @@ Item {
     installerDirect = false
     installConfirmed = false
     installStatus = ""
-    Qt.callLater(function() { installInput.forceActiveFocus() })
+    Qt.callLater(root.focusPaletteInput)
   }
 
   function supportedInstallUrl(value) {
@@ -997,20 +991,23 @@ Item {
     }
   }
 
-  Rectangle {
+  Loader {
+    id: paletteLoader
     anchors.fill: parent
-    visible: root.paletteOpen
+    active: root.paletteOpen
     z: 20
-    color: Qt.rgba(0, 0, 0, 0.58)
+    sourceComponent: Rectangle {
+      color: Qt.rgba(0, 0, 0, 0.58)
+      function focusInput() { (root.installMode ? installInput : paletteSearch).forceActiveFocus() }
 
     MouseArea {
+      objectName: "paletteDismissArea"
       anchors.fill: parent
       enabled: !pluginInstall.running
       onClicked: root.closeWidgetPicker()
     }
 
     Rectangle {
-      id: commandPalette
       anchors.centerIn: parent
       width: Math.min(parent.width - Commons.Style.space(72),
         Commons.Style.space(560))
@@ -1137,10 +1134,8 @@ Item {
         }
 
         Item {
-          id: pluginResultsViewport
           width: parent.width
-          height: root.installMode
-            ? parent.height - y : parent.height - y
+          height: parent.height - y
 
           Flickable {
             id: resultsFlick
@@ -1189,6 +1184,7 @@ Item {
 
                   delegate: WidgetModuleTile {
                     id: moduleTile
+                    objectName: "widgetPaletteTile"
                     required property var modelData
                     width: (moduleBay.width - moduleBay.spacing) / 2
                     controller: root.controller
@@ -1301,7 +1297,6 @@ Item {
             }
 
             Rectangle {
-              id: riskConfirmation
               width: parent.width
               height: Commons.Style.space(32)
               radius: root.controller.controlRadius
@@ -1331,8 +1326,7 @@ Item {
                 visible: root.validInstallUrl && !root.installConfirmed
 
                 SequentialAnimation on opacity {
-                  running: root.paletteOpen && root.installMode
-                    && root.validInstallUrl && !root.installConfirmed
+                  running: root.installMode && root.validInstallUrl && !root.installConfirmed
                   loops: 2
                   NumberAnimation {
                     from: 0.28
@@ -1388,9 +1382,7 @@ Item {
                   }
                   root.installMode = false
                   root.installConfirmed = false
-                  Qt.callLater(function() {
-                    paletteSearch.forceActiveFocus()
-                  })
+                  Qt.callLater(root.focusPaletteInput)
                 }
               }
 
@@ -1425,6 +1417,7 @@ Item {
           }
         }
       }
+    }
     }
   }
 

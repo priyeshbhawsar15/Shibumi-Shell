@@ -25,45 +25,32 @@ Ui.Panel {
     ? tokens.widgetContentColor(settings,
       bar ? bar.urgent : Commons.Color.accent)
     : (bar ? bar.urgent : Commons.Color.accent)
-  readonly property bool v1CustomToneActive: !!(tokens
-    && tokens.v2Shell !== true
-    && typeof tokens.widgetHasFill === "function"
-    && tokens.widgetHasFill(settings))
-  readonly property color v1Ink: v1CustomToneActive ? widgetInk
-    : tokens && "ink" in tokens ? tokens.ink : widgetInk
-  readonly property color v1Seal: v1CustomToneActive ? widgetInk
-    : tokens && "seal" in tokens ? tokens.seal : widgetInk
-  readonly property color v1Indigo: v1CustomToneActive ? widgetInk
-    : tokens && tokens.stateService
-      && typeof tokens.stateService.paletteColor === "function"
-      ? tokens.stateService.paletteColor("color04")
-      : Qt.rgba(v1Ink.r, v1Ink.g, v1Ink.b, 0.58)
-  readonly property string displayMode: String(
+  readonly property bool iconOnly: tokens.v2Shell !== true
+    && setting("displayMode", "full") === "icon-only"
+  readonly property string displayMode: iconOnly ? "icon" : String(
     setting("displayMode", setting("compact", false) ? "icon" : "full"))
   readonly property bool compact: displayMode === "icon"
   readonly property var networkService: networkServiceOverride
     || (bar && bar.shell && typeof bar.shell.serviceFor === "function"
       ? bar.shell.serviceFor("hancore.shibumi.network") : null)
+  function networkValue(fallback, reader) {
+    const service = networkService
+    return service && service.ready ? reader(service) : fallback
+  }
   readonly property bool networkReady: networkService && networkService.ready
-  readonly property bool backendAvailable: networkReady
-    && networkService.backendAvailable
-  readonly property string mode: !networkReady ? "none"
-    : networkService.kind === "wifi" ? "wifi"
-    : networkService.kind === "ethernet" ? "ethernet" : "none"
-  readonly property string label: networkReady ? networkService.label : ""
+  readonly property bool backendAvailable: networkValue(false, service => service.backendAvailable)
+  readonly property string mode: networkValue("none", service => service.kind === "wifi" ? "wifi" : service.kind === "ethernet" ? "ethernet" : "none")
+  readonly property string label: networkValue("", service => service.label)
   readonly property string displayLabel: mode === "none"
     ? "Offline" : mode === "ethernet" ? "Ethernet" : (label || "Wi-Fi")
-  readonly property int signal: networkReady ? networkService.signalStrength : 0
-  readonly property real downloadRate: networkReady
-    ? Math.max(0, Number(networkService.downloadRate || 0)) : 0
-  readonly property real uploadRate: networkReady
-    ? Math.max(0, Number(networkService.uploadRate || 0)) : 0
+  readonly property int signal: networkValue(0, service => service.signalStrength)
+  readonly property real downloadRate: networkValue(0, service => Math.max(0, Number(service.downloadRate || 0)))
+  readonly property real uploadRate: networkValue(0, service => Math.max(0, Number(service.uploadRate || 0)))
   readonly property bool v2Presentation: tokens && tokens.v2Shell === true
   readonly property string v2MonoFont: "JetBrainsMono Nerd Font"
-  readonly property bool v1TrafficPresentation: mode === "ethernet"
-    && displayMode === "full" && !v2Presentation
-  readonly property bool v2TrafficPresentation: mode === "ethernet"
-    && displayMode === "full" && v2Presentation
+  // Match content's horizontal full-content branch, including its fallback.
+  readonly property bool trafficPresentationVisible: visible && !!bar && !!tokens
+    && !bar.vertical && displayMode !== "icon" && displayMode !== "text"
   property var downloadHistory: []
   property var uploadHistory: []
   readonly property int trafficHistoryLimit: 30
@@ -146,9 +133,11 @@ Ui.Panel {
   }
 
   function syncTrafficConsumer() {
-    const nativeDemand = networkReady && "wiredConnected" in networkService
-    const desired = networkReady && (nativeDemand
-      ? networkService.wiredConnected : mode === "ethernet") ? networkService : null
+    const service = networkService
+    const nativeDemand = !!service && networkReady && "wiredConnected" in service
+    const desired = trafficPresentationVisible && networkReady
+      && (nativeDemand ? service.wiredConnected : mode === "ethernet")
+      ? service : null
     if (trafficService === desired) {
       trafficRetry.stop()
       return
@@ -197,6 +186,7 @@ Ui.Panel {
   }
 
   function syncPanelLoader() {
+    const service = networkService
     popupLoader.source = ""
     if (!opened || !String(popupSource)) {
       pendingPresentationMode = ""
@@ -205,27 +195,27 @@ Ui.Panel {
       releaseSession()
       return
     }
-    if (!networkReady) {
+    if (!service || !service.ready) {
       sessionRetry.stop()
       releaseSession()
       if (pendingPresentationMode !== "") presentationRetry.restart()
       return
     }
-    if (sessionService !== networkService) {
+    if (sessionService !== service) {
       releaseSession()
-      if (typeof networkService.beginSession !== "function"
-          || networkService.beginSession(root) !== true) {
+      if (typeof service.beginSession !== "function"
+          || service.beginSession(root) !== true) {
         sessionRetry.restart()
         return
       }
-      sessionService = networkService
+      sessionService = service
     }
     sessionRetry.stop()
     popupLoader.setSource(popupSource, {
       anchorItem: surface,
       bar: root.bar,
       ownerWidget: root,
-      networkService: networkService
+      networkService: service
     })
   }
 
@@ -236,6 +226,7 @@ Ui.Panel {
   }
 
   onOpenedChanged: syncPanelLoader()
+  onTrafficPresentationVisibleChanged: syncTrafficConsumer()
   onNetworkReadyChanged: {
     syncPanelLoader()
     syncTrafficConsumer()
@@ -313,6 +304,7 @@ Ui.Panel {
     interval: 2000
     repeat: true
     running: root.mode === "ethernet" && !root.v2Presentation
+      && root.trafficPresentationVisible
     onTriggered: root.appendTrafficSample()
   }
 
@@ -385,17 +377,21 @@ Ui.Panel {
   Component {
     id: v1FullContent
 
-    Row {
+    Presentation.InkRow {
+      optical: !root.bar || !root.bar.vertical
       spacing: 5
 
-      Text {
+      Presentation.BarGlyph {
+        symbol: false
+        barText: true
+        referencePixelSize: 12
         anchors.verticalCenter: parent.verticalCenter
         text: "NET"
         color: root.mode === "none"
-          ? Qt.rgba(root.v1Seal.r, root.v1Seal.g, root.v1Seal.b, 0.7)
-          : Qt.rgba(root.v1Ink.r, root.v1Ink.g, root.v1Ink.b, 0.6)
+          ? Qt.rgba(root.widgetInk.r, root.widgetInk.g, root.widgetInk.b, 0.7)
+          : Qt.rgba(root.widgetInk.r, root.widgetInk.g, root.widgetInk.b, 0.6)
         font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
-        font.pixelSize: 12
+        font.pixelSize: root.tokens.labelSize
         font.letterSpacing: 0.5
         renderType: Text.NativeRendering
       }
@@ -454,17 +450,16 @@ Ui.Panel {
             maximum = Math.max(maximum, Number(root.uploadHistory[index]) || 0)
           maximum *= 1.15
           paintSeries(context, root.downloadHistory,
-            root.v1Seal, maximum, 0.12, 1.5)
+            root.widgetInk, maximum, 0.12, 1.5)
           paintSeries(context, root.uploadHistory,
-            root.v1Indigo, maximum, 0.10, 1.0)
+            root.widgetInk, maximum, 0.10, 1.0)
         }
 
         Connections {
           target: root
           function onDownloadHistoryChanged() { v1TrafficChart.requestPaint() }
           function onUploadHistoryChanged() { v1TrafficChart.requestPaint() }
-          function onV1SealChanged() { v1TrafficChart.requestPaint() }
-          function onV1IndigoChanged() { v1TrafficChart.requestPaint() }
+          function onWidgetInkChanged() { v1TrafficChart.requestPaint() }
         }
 
         Component.onCompleted: requestPaint()
@@ -479,7 +474,7 @@ Ui.Panel {
           width: 54
           height: 11
           text: "↓" + root.v1Rate(root.downloadRate)
-          color: root.v1Seal
+          color: root.widgetInk
           font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
           font.pixelSize: 10
           horizontalAlignment: Text.AlignRight
@@ -491,7 +486,7 @@ Ui.Panel {
           width: 54
           height: 11
           text: "↑" + root.v1Rate(root.uploadRate)
-          color: root.v1Indigo
+          color: root.widgetInk
           font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
           font.pixelSize: 10
           horizontalAlignment: Text.AlignRight
@@ -500,21 +495,26 @@ Ui.Panel {
         }
       }
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
+        optical: !root.bar || !root.bar.vertical
+        nativeText: connectionIcon(root.mode, root.signal)
         visible: root.mode === "wifi"
         anchors.verticalCenter: parent.verticalCenter
         text: root.stateGlyph
-        color: root.v1Ink
+        color: root.widgetInk
         font.pixelSize: 14
       }
 
-      Text {
+      Presentation.BarGlyph {
+        symbol: false
+        barText: true
+        referencePixelSize: 12
         anchors.verticalCenter: parent.verticalCenter
         visible: root.mode === "wifi"
         text: root.label
-        color: root.v1Seal
+        color: root.widgetInk
         font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
-        font.pixelSize: 12
+        font.pixelSize: root.tokens.labelSize
         font.letterSpacing: 1
         renderType: Text.NativeRendering
       }
@@ -524,10 +524,14 @@ Ui.Panel {
   Component {
     id: v2FullContent
 
-    Row {
+    Presentation.InkRow {
+      optical: !root.bar || !root.bar.vertical
+      boundLastAdvance: true
       spacing: 4
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
+        optical: !root.bar || !root.bar.vertical
+        nativeText: connectionIcon(root.mode, root.signal)
         visible: root.mode === "wifi"
         anchors.verticalCenter: parent.verticalCenter
         text: root.stateGlyph
@@ -536,7 +540,9 @@ Ui.Panel {
         Behavior on color { ColorAnimation { duration: 160 } }
       }
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
+        optical: !root.bar || !root.bar.vertical
+        nativeText: connectionIcon(root.mode, root.signal)
         visible: root.mode !== "wifi"
         anchors.verticalCenter: parent.verticalCenter
         text: root.stateGlyph
@@ -579,8 +585,9 @@ Ui.Panel {
     }
   }
 
-  component BoundedLabel: Text {
+  component BoundedLabel: Presentation.IconText {
     id: boundedLabel
+    barText: true
 
     required property real maximumWidth
 
@@ -674,14 +681,13 @@ Ui.Panel {
   Component {
     id: compactContent
 
-    Presentation.IconText {
+    Presentation.BarGlyph {
+      optical: !root.bar || !root.bar.vertical
+      nativeText: connectionIcon(root.mode, root.signal)
       text: root.stateGlyph
-      color: root.v2Presentation ? (root.mode === "none"
-          ? Qt.rgba(root.widgetInk.r, root.widgetInk.g, root.widgetInk.b, 0.65)
-          : root.widgetInk)
-        : root.mode === "none"
-          ? Qt.rgba(root.v1Seal.r, root.v1Seal.g, root.v1Seal.b, 0.65)
-          : root.v1Seal
+      color: root.mode === "none"
+        ? Qt.rgba(root.widgetInk.r, root.widgetInk.g, root.widgetInk.b, 0.65)
+        : root.widgetInk
       font.pixelSize: root.mode === "none" ? 15 : 14
     }
   }
@@ -705,7 +711,8 @@ Ui.Panel {
   Component {
     id: verticalContent
 
-    Presentation.IconText {
+    Presentation.BarGlyph {
+      nativeText: connectionIcon(root.mode, root.signal)
       text: root.stateGlyph
       color: root.widgetInk
       opacity: root.mode === "none" ? 0.58 : 1

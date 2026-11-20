@@ -44,9 +44,12 @@ jq -e '.schemaVersion == 1
   and (.states | map(.id)) == [
     "public-beta.11", "step-5-tip", "public-beta.12", "public-beta.13",
     "source-beta.14", "public-beta.14.1",
-    "fork-gaming-visualizer-pause",
-    "fork-registry-prime",
-    "fork-widget-settings"
+    "fork-gaming-visualizer-pause", "fork-registry-prime", "fork-widget-settings", "fork-notch-width",
+    "public-beta.15", "public-beta.15.1",
+    "public-beta.15.2", "public-beta.15.3", "public-beta.15.4", "public-beta.16",
+    "public-beta.16.1", "public-beta.16.2", "public-beta.16.3", "public-beta.16.4",
+    "public-beta.16.5", "public-beta.16.5.1", "public-0.2.0", "public-0.2.1",
+    "source-0.2.1", "public-0.2.2", "source-0.2.2", "public-0.2.3", "source-0.2.3", "public-0.2.4", "source-0.2.4", "public-0.2.5"
   ]' \
   contracts/lifecycle-predecessors-v1.json >/dev/null
 grep -Fq 'contracts/lifecycle-predecessors-v1.json' "$pkgbuild" || {

@@ -20,6 +20,12 @@ from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from shibumi_suite.config import remove_suite  # noqa: E402
+from shibumi_suite.model import Suite, suite_payload_digest  # noqa: E402
+
+
 NAYUKI_NOTICE = """Third-party notice: QR Code generator library
 
 Copyright (c) Project Nayuki. (MIT License)
@@ -66,7 +72,6 @@ class PackageReleaseTests(unittest.TestCase):
         marker = json.loads(
             (ROOT / "packaging/package-metadata.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(version, "0.1.1-beta.14.1")
         self.assertEqual(suite["suiteVersion"], version)
         self.assertEqual(marker["version"], version)
         for plugin in suite["plugins"]:
@@ -146,7 +151,11 @@ class PackageReleaseTests(unittest.TestCase):
             },
             "public-beta.14.1": {
                 "suiteVersion": "0.1.1-beta.14.1",
-                "sourceRevisions": ["package:0.1.1-beta.14.1", "7a6c853b1947d303bad9a5b640c224c01b669106"],
+                "sourceRevisions": [
+                    "7a6c853b1947d303bad9a5b640c224c01b669106",
+                    "b9bf65993bc04c1d49dc98a78b60d5594478a7bd",
+                    "package:0.1.1-beta.14.1",
+                ],
                 "settingsStorageVersion": 1,
                 "payloadDigest": "0350a8f66d81dc640b6d268ace149620ae78c40aea13ad2cd507ad6de93d8de3",
             },
@@ -168,6 +177,213 @@ class PackageReleaseTests(unittest.TestCase):
                 "settingsStorageVersion": 1,
                 "payloadDigest": "6e8167c7b05357f0deae821dc1d3cbe4b9e5c9329e42aa2e0790a106a1545025",
             },
+            "fork-notch-width": {
+                "suiteVersion": "0.1.1-beta.14.1",
+                "sourceRevisions": ["5eb47d11810663e89f769eb81b8b7393463a24c9"],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "cd1c40c0d46a734d738d568cc37178fffc04baa8a37522796a0302d1b2f85fa4",
+            },
+            "public-beta.15": {
+                "suiteVersion": "0.1.1-beta.15",
+                "sourceRevisions": [
+                    "4e91c26ebf4da07476d4be6176f29d7662fed9c1",
+                    "91b2cd0f886c15962a2627aea3269f4c09cae828",
+                    "7c0499289c48b9f4b3dfd28687a23824e752f15d",
+                    "package:0.1.1-beta.15",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "7eeb2a88e0920d2fe647f4ef88b8a00ad54a205c3b627234b402d50b4709b11d",
+            },
+            "public-beta.15.1": {
+                "suiteVersion": "0.1.1-beta.15.1",
+                "sourceRevisions": [
+                    "36e4b9f0de428c17248d40592461a9e3f3f750f8",
+                    "533110d7abda296b56369f304a618f9313e1f12f",
+                    "package:0.1.1-beta.15.1",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "31a2e133191264e2e63919eed7f43c5393ac5c5aadda23ea9199afd211f53274",
+            },
+            "public-beta.15.2": {
+                "suiteVersion": "0.1.1-beta.15.2",
+                "sourceRevisions": [
+                    "c45af77c8333b691ac36522247b6e5b5481a3666",
+                    "aaf7611d66ed5f99078fc5419bc3ba4db6164bed",
+                    "package:0.1.1-beta.15.2",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "5401b03f80a876f636d2635478cbe5af3da75c49022a614823a5c6586a3170d0",
+            },
+            "public-beta.15.3": {
+                "suiteVersion": "0.1.1-beta.15.3",
+                "sourceRevisions": [
+                    "5b1d21f0cea73bb9e7997278a828b3ef295e6c94",
+                    "db579163a4b1004a7cc09ee565cac616db9ff627",
+                    "package:0.1.1-beta.15.3",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "60e1904b23e98317e896fdd0bbf98daf44ba504f5eb22f3a8ae86ab5ab72a342",
+            },
+            "public-beta.15.4": {
+                "suiteVersion": "0.1.1-beta.15.4",
+                "sourceRevisions": [
+                    "6594b989c9f5edfe557669b0413a9bd3e50f8e81",
+                    "67d87c5d7f61fca4b05e79a089238805e0e0737f",
+                    "81f6bcd28cf0e0b5c435761150b2b73083f1e4fa",
+                    "package:0.1.1-beta.15.4",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "5686a127809125ea0b715f41fd4cf9d9bc6817b372ce8b0370dcb42337a616fa",
+            },
+            "public-beta.16": {
+                "suiteVersion": "0.1.1-beta.16",
+                "sourceRevisions": [
+                    "4840482ec0e06a2ebd478120833d4fae1f30889e",
+                    "05548c8d9ffdf0d37962d6e423e2a0dc21b8cd91",
+                    "package:0.1.1-beta.16",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "f08b4ec613f248fda62d7dec9865ea46a846fa2e91b2723a186adc0ab0bffc41",
+            },
+            "public-beta.16.1": {
+                "suiteVersion": "0.1.1-beta.16.1",
+                "sourceRevisions": [
+                    "3b35049af69aba57784376e916f50146d61eb411",
+                    "65c8d8bf72a674a35c5bb8ae85d0fff21b4e5cb6",
+                    "package:0.1.1-beta.16.1",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "46f72fd02b00dbe34326dbbdf6e95556e7e35641a4d597c5281bc2beed94a974",
+            },
+            "public-beta.16.2": {
+                "suiteVersion": "0.1.1-beta.16.2",
+                "sourceRevisions": [
+                    "bd1224ba92fbf279666abe362ff5cf7a165da096",
+                    "e07853b54f018ab694572c7502297e0f17752220",
+                    "package:0.1.1-beta.16.2",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "79c61d5e048c669c9eb27ebaad21987327892089daea501d0cf4185150a26f9e",
+            },
+            "public-beta.16.3": {
+                "suiteVersion": "0.1.1-beta.16.3",
+                "sourceRevisions": [
+                    "1a13d6be7d5b4bc9aa03590b77b6531aefcad497",
+                    "494fa69b9e348fa595eb4d55d2e11b4aa2fd4470",
+                    "package:0.1.1-beta.16.3",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "9d8cca435b465c52b0ff21d7a6780f90251a805dc1d1e72b78473ca2a8338a88",
+            },
+            "public-beta.16.4": {
+                "suiteVersion": "0.1.1-beta.16.4",
+                "sourceRevisions": [
+                    "64b9369559b0de2ffdc1faf1c563326c8173035c",
+                    "aec6c0a3266d71f6a5f9cfa17562d8bec0ce9b17",
+                    "package:0.1.1-beta.16.4",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "bc60b476803f72d5604e592647db7f50c1f00723b986ae87e7730cba79779d34",
+            },
+            "public-beta.16.5": {
+                "suiteVersion": "0.1.1-beta.16.5",
+                "sourceRevisions": [
+                    "8b34d030a303aa35d6033923c8f3c38c4c25b29b",
+                    "1d7a00b2742fb4d479774a4f722c6c2ef96d0601",
+                    "package:0.1.1-beta.16.5",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "a090b82858c554f02d44030755f779b2827ae51e55bca750b7163d5b330472dd",
+            },
+            "public-beta.16.5.1": {
+                "suiteVersion": "0.1.1-beta.16.5.1",
+                "sourceRevisions": [
+                    "20108270fb408cf562e0117de19e56978ca529a8",
+                    "a5302f11398b785c24d783d07ee22f657b2d9970",
+                    "package:0.1.1-beta.16.5.1",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "a4a0b43a04603a9b40354df1498e74b4b42e55158c1d3f9d68c9460db30802cf",
+            },
+            "public-0.2.0": {
+                "suiteVersion": "0.2.0",
+                "sourceRevisions": [
+                    "795eae8608e0cff691880e26f159bbc3dc779a8f",
+                    "fe7da3042582b9ab0deea4540db16f6b856a4a51",
+                    "5c14ced12cc3c64c4be23dd8082a9ab467b7ee4c",
+                    "package:0.2.0",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "700b94610f999ec50c1c39c06ee82e9083b4dc1f1749f775955c801848f1af43",
+            },
+            "public-0.2.1": {
+                "suiteVersion": "0.2.1",
+                "sourceRevisions": ["package:0.2.1"],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "f9e16a5577dd1f3e9648fab4f6c7b308c34026a5d271208a3bd3a8a318fa4a9d",
+            },
+            "source-0.2.1": {
+                "suiteVersion": "0.2.1",
+                "sourceRevisions": [
+                    "29a588a9d3ec82a5d5c75cc76e8f745f5c9ae629",
+                    "5698d93d55bce8ec0494a95c98e9882265615354",
+                    "cab07a0897df090c6d8de32e6073912109a7beca",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "f9e16a5577dd1f3e9648fab4f6c7b308c34026a5d271208a3bd3a8a318fa4a9d",
+            },
+            "public-0.2.2": {
+                "suiteVersion": "0.2.2",
+                "sourceRevisions": ["package:0.2.2"],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "b2abbef69091df607c6b540c4a0edb8a37cd76a402d4c9efd862b5dab3cd602f",
+            },
+            "source-0.2.2": {
+                "suiteVersion": "0.2.2",
+                "sourceRevisions": [
+                    "5380c0db9aaf076c985835bb2eea31df8ec2652a",
+                    "d20f0526b12684453252fe2d722e996fedfe5eab",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "b2abbef69091df607c6b540c4a0edb8a37cd76a402d4c9efd862b5dab3cd602f",
+            },
+            "public-0.2.3": {
+                "suiteVersion": "0.2.3",
+                "sourceRevisions": ["package:0.2.3"],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "97bdf62db126f34b1dafe576e8eeb6889227c100a4f5ec91d0053bdcfb7b8432",
+            },
+            "source-0.2.3": {
+                "suiteVersion": "0.2.3",
+                "sourceRevisions": [
+                    "a8fc782b6c10cd65c64ab8e3a8d8e1a3157b04f3",
+                    "41002a830027faaac2a8436eea6f6aae0dcca4b5",
+                    "80fe4cd99062e5b29e001e6a57c6f55c78cc0709",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "97bdf62db126f34b1dafe576e8eeb6889227c100a4f5ec91d0053bdcfb7b8432",
+            },
+            "public-0.2.4": {
+                "suiteVersion": "0.2.4",
+                "sourceRevisions": ["package:0.2.4"],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "685e88c5bddf448be0f0e1b4f092edfa747c487d4c7993f1fc20af11c7a59496",
+            },
+            "source-0.2.4": {
+                "suiteVersion": "0.2.4",
+                "sourceRevisions": [
+                    "12763c6874a9af02fa8e038ab520a409c60f8dc2",
+                    "700180efd0660186c160343392979111fd924542",
+                ],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "685e88c5bddf448be0f0e1b4f092edfa747c487d4c7993f1fc20af11c7a59496",
+            },
+            "public-0.2.5": {
+                "suiteVersion": "0.2.5",
+                "sourceRevisions": ["package:0.2.5"],
+                "settingsStorageVersion": 1,
+                "payloadDigest": "6eb8ce380d21ad8454c33357198f917d63a8a5458ed5a69ba87583cec083bc26",
+            },
         }
         self.assertEqual(set(states), set(expected))
         for identity_id, pinned in expected.items():
@@ -188,6 +404,44 @@ class PackageReleaseTests(unittest.TestCase):
                     digest.update(plugin_digest.encode("ascii"))
                     digest.update(b"\0")
                 self.assertEqual(digest.hexdigest(), state["payloadDigest"])
+
+        suite = Suite.load(ROOT)
+        current_version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        current_id = "public-0.2.5"
+        self.assertEqual(states[current_id]["suiteVersion"], current_version)
+        # Personal fork: the working tree carries personal modifications, so it
+        # is never the public package. Pin the public identity to the actual
+        # upstream release commit instead, and keep the fork's payload from
+        # posing as it.
+        upstream_release = "f944f9ab60b93d01ea1dce32ab14516a7c577f69"
+        archive = subprocess.run(
+            ["git", "--no-replace-objects", "-C", str(ROOT), "archive",
+             upstream_release, "--", *sorted(suite.plugins)],
+            check=True, stdout=subprocess.PIPE,
+        ).stdout
+        with tempfile.TemporaryDirectory() as released:
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+                bundle.extractall(released, filter="data")
+            release_plugin_digests = {
+                plugin_id: spec.payload_digest(Path(released) / plugin_id)
+                for plugin_id, spec in suite.plugins.items()
+            }
+        self.assertEqual(
+            states[current_id]["pluginDigests"],
+            release_plugin_digests,
+        )
+        self.assertEqual(
+            states[current_id]["payloadDigest"],
+            suite_payload_digest(release_plugin_digests),
+        )
+        fork_plugin_digests = {
+            plugin_id: spec.payload_digest()
+            for plugin_id, spec in suite.plugins.items()
+        }
+        self.assertNotEqual(
+            suite_payload_digest(fork_plugin_digests),
+            states[current_id]["payloadDigest"],
+        )
         self.assertNotIn(
             "package:0.1.1-beta.12",
             states["public-beta.12"]["sourceRevisions"],
@@ -243,6 +497,7 @@ class PackageReleaseTests(unittest.TestCase):
             ("0.1.1-beta.8", "--prerelease"),
             ("0.1.1-rc.1+build.7", "--prerelease"),
             ("0.1.1", "--latest"),
+            ("0.2.0", "--latest"),
             ("1.0.0+build.7", "--latest"),
         ):
             with self.subTest(version=version):
@@ -480,37 +735,12 @@ puts JSON.generate(workflow.fetch("jobs"))
                 )
                 self.assertEqual(admitted.returncode == 0, expected, admitted.stderr)
 
-    def test_quattro_runtime_pins_predecessor_and_both_package_arms(self) -> None:
-        runtime_path = ROOT / "tests/shibumi-suite-quattro-runtime.sh"
-        predecessor = (
-            "predecessor_revision="
-            "2760cdb8272255790d5e4613fed8a48cb63c3555"
-        )
-        arm_markers = ("# Arm 1: package update", "# Arm 2: fresh install")
-
-        def assert_contract(text: str) -> None:
-            self.assertEqual(text.count(predecessor), 1)
-            for marker in arm_markers:
-                self.assertEqual(text.count(marker), 1)
-
-        runtime = runtime_path.read_text(encoding="utf-8")
-        assert_contract(runtime)
-        with tempfile.TemporaryDirectory(
-            prefix="shibumi-quattro-arm-markers."
-        ) as temporary:
-            missing_marker = Path(temporary) / "quattro-runtime-missing-arm.sh"
-            missing_marker.write_text(
-                runtime.replace(arm_markers[1], "", 1), encoding="utf-8"
-            )
-            with self.assertRaises(AssertionError):
-                assert_contract(missing_marker.read_text(encoding="utf-8"))
-
     def test_quattro_uninstall_assertion_rejects_all_suite_leftovers(self) -> None:
         runtime = (ROOT / "tests/shibumi-suite-quattro-runtime.sh").read_text(
             encoding="utf-8"
         )
         helper_start = runtime.index("assert_uninstalled_arm() {\n")
-        helper_end = runtime.index("\n}\n\ndrain_fixture_shells()", helper_start) + 3
+        helper_end = runtime.index("\n}\n\nrun_keep_settings_cycle()", helper_start) + 3
         helper = runtime[helper_start:helper_end]
 
         with tempfile.TemporaryDirectory(
@@ -525,7 +755,8 @@ puts JSON.generate(workflow.fetch("jobs"))
                 "state_home=$2\n"
                 "cache_home=$3\n"
                 "fail() { printf 'fixture fail: %s\\n' \"$*\" >&2; exit 1; }\n"
-                "shell_ipc() { printf 'ok\\n'; }\n"
+                "shell_ipc() { if [[ $* == 'shell ping' ]]; then printf 'ok\\n'; "
+                "else printf '%s\\n' \"$(<\"$config_home/omarchy/shell.json\")\"; fi; }\n"
                 f"{helper}\n"
                 "assert_uninstalled_arm\n",
                 encoding="utf-8",
@@ -584,6 +815,110 @@ puts JSON.generate(workflow.fetch("jobs"))
                     self.assertEqual(result.returncode, expected_exit, result.stderr)
                     self.assertEqual(result.stderr, expected_stderr)
 
+    def test_quattro_kept_settings_assertion_rejects_loss_and_partial_restore(self) -> None:
+        runtime = (ROOT / "tests/shibumi-suite-quattro-runtime.sh").read_text()
+        helpers = runtime[runtime.index("state_settings_snapshot() {"):
+                          runtime.index("run_keep_settings_cycle() {")]
+        entry = {
+            "id": "hancore.shibumi.state",
+            "shibumiStateSchemaVersion": 1,
+            "foreignFuture": {"nested": [1, False, {"label": "Malmö"}]},
+            "shibumi": {"version": 1, "presentation": {"accent": "color06"},
+                        "widgets": {"G8": {"deep": [3, 2, 1]}}},
+        }
+        expected = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        installed = {
+            "version": 1,
+            "bar": {"id": "hancore.shibumi.bar", "layout": {
+                "left": ["hancore.shibumi.audio"], "center": [], "right": []}},
+            "plugins": [entry, {"id": "hancore.shibumi.audio"}],
+        }
+        suite = Suite.load(ROOT)
+        with tempfile.TemporaryDirectory(prefix="shibumi-quattro-kept-settings.") as temporary:
+            root = Path(temporary)
+            script = root / "assert-settings"
+            script.write_text(
+                "#!/usr/bin/env bash\nset -euo pipefail\n"
+                "config_home=$1; state_home=$2; cache_home=$3; live_config=$4\n"
+                "fail() { printf 'fixture fail: %s\\n' \"$*\" >&2; exit 1; }\n"
+                "shell_ipc() {\n"
+                "  case \"$*\" in\n"
+                "    'shell ping') printf 'ok\\n' ;;\n"
+                "    'shell listShellConfig') printf '%s\\n' \"$(<\"$live_config\")\" ;;\n"
+                "    *) return 99 ;;\n"
+                "  esac\n}\n"
+                f"{helpers}\n"
+                "case $6 in\n"
+                "  uninstall) assert_uninstalled_arm \"$5\" ;;\n"
+                "  reinstall) assert_settings_preserved \"$5\" reinstall ;;\n"
+                "  purge) assert_uninstalled_arm ;;\n"
+                "esac\n"
+            )
+            # Exercise the real lifecycle transformation with/without retention,
+            # then execute the exact Bash/JQ assertions used by the runtime gate.
+            kept, dropped = [remove_suite(
+                installed, suite.plugins, root / "absent-plugins",
+                "hancore.shibumi.bar", "omarchy.clock", keep,
+                restore_bar={"id": "omarchy.bar", "layout": {
+                    "left": [{"id": "omarchy.menu"}],
+                    "center": ["omarchy.clock"], "right": []}},
+            ) for keep in (True, False)]
+            self.assertEqual(kept["plugins"], [entry])
+            self.assertEqual(dropped["plugins"], [])
+            reset = json.loads(json.dumps(kept))
+            reset["plugins"][0]["shibumi"]["presentation"]["accent"] = "color01"
+            partial = json.loads(json.dumps(kept))
+            del partial["plugins"][0]["foreignFuture"]
+            duplicate = json.loads(json.dumps(kept))
+            duplicate["plugins"].append(entry)
+            bad_schema = json.loads(json.dumps(kept))
+            bad_schema["plugins"][0]["shibumiStateSchemaVersion"] = 2
+            cases = (
+                ("retained-positive", kept, kept, "uninstall", "", ""),
+                ("reinstall-positive", kept, kept, "reinstall", "", ""),
+                ("without-keep-settings", dropped, dropped, "uninstall", "",
+                 "keep-settings uninstall canonical State settings are missing or invalid"),
+                ("reinstall-reset", reset, reset, "reinstall", "",
+                 "reinstall changed the complete State settings entry"),
+                ("lost-unknown-field", partial, partial, "reinstall", "",
+                 "reinstall changed the complete State settings entry"),
+                ("duplicate-entry", duplicate, duplicate, "uninstall", "",
+                 "keep-settings uninstall canonical State settings are missing or invalid"),
+                ("wrong-schema", bad_schema, bad_schema, "uninstall", "",
+                 "keep-settings uninstall canonical State settings are missing or invalid"),
+                ("live-reset", kept, reset, "reinstall", "",
+                 "reinstall live State settings differ from file snapshot"),
+                ("payload-leftover", kept, kept, "uninstall", "hancore.shibumi.state",
+                 "Shibumi plugin entry remains after uninstall"),
+                ("hidden-leftover", kept, kept, "uninstall", ".shibumi-stage-leftover",
+                 "hidden lifecycle artifacts remain after uninstall"),
+                ("purge-rejects-dormant-entry", kept, kept, "purge", "",
+                 "uninstall did not restore a Shibumi-free config"),
+            )
+            for name, config, live, phase, leftover, diagnostic in cases:
+                with self.subTest(case=name):
+                    base = root / name
+                    config_home, state_home, cache_home = [base / x for x in ("config", "state", "cache")]
+                    plugins = config_home / "omarchy/plugins"
+                    plugins.mkdir(parents=True)
+                    state_home.mkdir()
+                    cache_home.mkdir()
+                    (config_home / "omarchy/shell.json").write_text(json.dumps(config))
+                    live_path = base / "live.json"
+                    live_path.write_text(json.dumps(live, sort_keys=True))
+                    if leftover:
+                        (plugins / leftover).mkdir()
+                        (plugins / leftover / ".shibumi-managed.json").write_text("{}")
+                    result = subprocess.run(
+                        ["bash", str(script), str(config_home), str(state_home),
+                         str(cache_home), str(live_path), expected, phase],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 1 if diagnostic else 0, result.stderr)
+                    self.assertEqual(result.stderr, f"fixture fail: {diagnostic}\n" if diagnostic else "")
+                    print(f"keep-settings assertion control {name}: exit={result.returncode}; "
+                          f"{diagnostic or 'identical complete State entry'}", flush=True)
+
     def test_quattro_cleanup_rejects_foreign_units_without_systemctl(self) -> None:
         runtime = (ROOT / "tests/shibumi-suite-quattro-runtime.sh").read_text(
             encoding="utf-8"
@@ -615,60 +950,97 @@ puts JSON.generate(workflow.fetch("jobs"))
                 "SHIBUMI_TEST_CLEANUP_LOG": str(root / "cleanup.log"),
                 "SHIBUMI_TEST_SERVICE_PREFIX": "shibumi-runtime-Ab12Cd",
             })
+            for unit in ("production-user.service", "shibumi-runtime-Ab12Cd-0.service",
+                         "shibumi-runtime-Ab12Cd-33.service"):
+                with self.subTest(unit=unit):
+                    service_file.write_text(unit + "\n")
+                    result = subprocess.run(
+                        [str(script)], text=True, capture_output=True,
+                        env=environment, timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("refusing foreign fixture service", result.stderr)
+                    self.assertFalse(systemctl_log.exists())
+            # All 32 owned identities pass the start allowlist; a 33rd generation
+            # must be refused before any launch or service-file append.
+            start_script = runtime.split(
+                "cat >\"$start_shell\" <<'START_SHELL'\n", 1
+            )[1].split("\nSTART_SHELL", 1)[0]
+            script.write_text(start_script)
+            full_budget = "".join(f"shibumi-runtime-Ab12Cd-{i}.service\n"
+                                  for i in range(1, 33))
+            service_file.write_text(full_budget)
             result = subprocess.run(
-                [str(script)],
+                [str(script)], text=True, capture_output=True,
+                env=environment, timeout=10,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stderr, "isolated shell service generation limit exceeded\n")
+            self.assertEqual(service_file.read_text(), full_budget)
+            self.assertFalse(systemctl_log.exists())
+
+    def test_quattro_cleanup_removal_failure_is_fatal(self) -> None:
+        runtime = (ROOT / "tests/shibumi-suite-quattro-runtime.sh").read_text(
+            encoding="utf-8"
+        )
+        helper_start = runtime.index("cleanup() {\n")
+        helper_end = runtime.index("\n}\ntrap cleanup EXIT", helper_start) + 3
+        cleanup = runtime[helper_start:helper_end]
+
+        with tempfile.TemporaryDirectory(
+            prefix="shibumi-cleanup-removal."
+        ) as temporary:
+            root = Path(temporary)
+            harness = root / "cleanup"
+            harness.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "tmpdir=$1\n"
+                "stop_shells=\n"
+                "cleanup_log=\n"
+                "service_prefix=shibumi-runtime-Ab12Cd\n"
+                "cleanup_probe_armed=0\n"
+                "failed=0\n"
+                f"{cleanup}\n"
+                "cleanup\n",
+                encoding="utf-8",
+            )
+            harness.chmod(0o755)
+
+            failed_scratch = root / "failed-scratch"
+            failed_scratch.mkdir()
+            (failed_scratch / "sentinel").write_text("retained\n", encoding="utf-8")
+            stub_bin = root / "bin"
+            stub_bin.mkdir()
+            rm_stub = stub_bin / "rm"
+            rm_stub.write_text("#!/usr/bin/env bash\nexit 73\n", encoding="utf-8")
+            rm_stub.chmod(0o755)
+            environment = os.environ.copy()
+            environment["PATH"] = f"{stub_bin}:{environment['PATH']}"
+            failed = subprocess.run(
+                [str(harness), str(failed_scratch)],
                 text=True,
                 capture_output=True,
                 env=environment,
             )
-            self.assertEqual(result.returncode, 1)
-            self.assertIn("refusing foreign fixture service", result.stderr)
-            self.assertFalse(systemctl_log.exists())
+            self.assertEqual(failed.returncode, 1, failed.stderr)
+            self.assertTrue((failed_scratch / "sentinel").is_file())
+            self.assertIn(
+                "Runtime fixture temporary directory cleanup failed",
+                failed.stderr,
+            )
 
-    def test_quattro_runtime_isolates_shell_generations_and_cleanup(self) -> None:
-        runtime = (ROOT / "tests/shibumi-suite-quattro-runtime.sh").read_text(
-            encoding="utf-8"
-        )
-        readiness = runtime.split("shell_ready=0", 1)[1].split(
-            "suite_cli install --yes", 1
-        )[0]
-        self.assertNotIn("shell_ipc -q", readiness)
-        self.assertIn("shell_ipc shell ping", readiness)
-        self.assertIn("[[ $shell_ready -eq 1 ]]", readiness)
-        self.assertIn('cp -a "$omarchy_path/bin" "$fixture_omarchy/bin"', runtime)
-        self.assertNotIn('ln -s "$omarchy_path/bin"', runtime)
-        self.assertIn('rm -f "$fixture_omarchy/bin/omarchy-restart-shell"', runtime)
-        self.assertIn('"$fixture_omarchy/bin/omarchy-update-available"', runtime)
-        self.assertIn("command -v omarchy-update-available", runtime)
-        self.assertIn("systemd-run --user --quiet --collect", runtime)
-        self.assertEqual(runtime.count("systemd-run --user"), 2)
-        self.assertEqual(
-            runtime.count("timeout --kill-after=1s 8s systemd-run --user"), 2
-        )
-        self.assertNotIn("$(systemctl --user show", runtime)
-        self.assertIn("--property=KillMode=control-group", runtime)
-        self.assertIn("SHIBUMI_TEST_SERVICE_FILE", runtime)
-        self.assertIn("SHIBUMI_TEST_SERVICE_PREFIX", runtime)
-        self.assertIn("refusing foreign fixture service", runtime)
-        self.assertIn("^${SHIBUMI_TEST_SERVICE_PREFIX}-([1-9]|1[0-2])", runtime)
-        self.assertIn("--kill-whom=all --signal=TERM", runtime)
-        self.assertIn("--kill-whom=all --signal=KILL", runtime)
-        self.assertIn("timeout --kill-after=1s 8s", runtime)
-        self.assertNotIn("while timeout", runtime)
-        self.assertNotIn("/proc/[0-9]*", runtime)
-        self.assertNotIn("fixture_process_ids", runtime)
-        self.assertIn('>>"$SHIBUMI_TEST_SHELL_LOG"', runtime)
-        self.assertIn('"$tmpdir/quickshell.log"', runtime)
-        final_drain = runtime.index("final fixture shell service drain failed")
-        log_scan = runtime.index("runtime log contains a QML or plugin-load failure")
-        self.assertLess(final_drain, log_scan)
-        self.assertIn("TERM-resistant cleanup probe", runtime)
-        self.assertIn("cleanup_probe_armed=1", runtime)
-        self.assertIn("(( cleanup_probe_armed == 1 ))", runtime)
-        self.assertIn('printf \'KILL %s\\n\'', runtime)
-        self.assertIn("did not exercise the cleanup KILL fallback", runtime)
-        self.assertIn("cleanup exceeded its wall-clock budget", runtime)
-        self.assertIn('>"$stub_bin/hyprctl"', runtime)
+            removed_scratch = root / "removed-scratch"
+            removed_scratch.mkdir()
+            (removed_scratch / "sentinel").write_text("removed\n", encoding="utf-8")
+            removed = subprocess.run(
+                [str(harness), str(removed_scratch)],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(removed.returncode, 0, removed.stderr)
+            self.assertFalse(removed_scratch.exists())
+            self.assertFalse(removed_scratch.is_symlink())
 
     def test_release_evidence_collector_declares_unique_complete_gates(self) -> None:
         result = subprocess.run(
@@ -713,7 +1085,7 @@ puts JSON.generate(workflow.fetch("jobs"))
         module = importlib.util.module_from_spec(spec)
         loader.exec_module(module)
 
-        for name, command, prefix in module.HOST_PROBES:
+        for name, command, prefix in module.host_probe_expectations()[0]:
             with self.subTest(probe=name, failure="missing"):
                 with patch.object(
                     module.subprocess, "run", side_effect=FileNotFoundError("missing")
@@ -733,9 +1105,13 @@ puts JSON.generate(workflow.fetch("jobs"))
                     self.assertFalse(
                         module.probe_host_identity(name, command, prefix)["valid"]
                     )
+            with self.subTest(probe=name, failure="trailing-identity"):
+                result = subprocess.CompletedProcess(command, 0, prefix + "-wrong\n", "")
+                with patch.object(module.subprocess, "run", return_value=result):
+                    self.assertFalse(module.probe_host_identity(name, command, prefix)["valid"])
             with self.subTest(probe=name, result="valid"):
                 result = subprocess.CompletedProcess(
-                    command, 0, prefix + "test-version\n", ""
+                    command, 0, prefix + "\n", ""
                 )
                 with patch.object(module.subprocess, "run", return_value=result):
                     self.assertTrue(
@@ -990,10 +1366,6 @@ puts JSON.generate(workflow.fetch("jobs"))
         for environment_name, _manifest in module.EXTERNAL_BASELINES:
             self.assertIn(environment_name, str(missing.exception))
 
-        helper_text = (ROOT / "tests/lib/baselines.sh").read_text(encoding="utf-8")
-        self.assertIn("shibumi_preflight_clean_git_checkout", helper_text)
-        self.assertIn("--untracked-files=all --ignore-submodules=none", helper_text)
-
     def test_release_evidence_revalidates_inputs_around_every_gate(self) -> None:
         path = ROOT / "scripts/collect-release-evidence"
         loader = importlib.machinery.SourceFileLoader(
@@ -1103,6 +1475,8 @@ puts JSON.generate(workflow.fetch("jobs"))
                 ["git", "-C", str(candidate), "checkout", "-q", _candidate_revision],
                 check=True,
             )
+            # Git recreated this fixture file using the caller's umask.
+            candidate_tracked.chmod(0o644)
             replacement_program = "\n".join((
                 "import subprocess",
                 f"repo = {str(candidate)!r}",
@@ -1219,6 +1593,19 @@ puts JSON.generate(workflow.fetch("jobs"))
         module = importlib.util.module_from_spec(spec)
         loader.exec_module(module)
 
+        self.assertEqual(module.GATE_TIMEOUT_SECONDS, 1800)
+        release_runbook = (ROOT / "docs/development/release.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "Every evidence gate has a 30-minute process-group timeout.",
+            release_runbook,
+        )
+        self.assertNotIn(
+            "Every evidence gate has a 15-minute process-group timeout.",
+            release_runbook,
+        )
+
         with tempfile.TemporaryDirectory(
             prefix="shibumi-evidence-progress."
         ) as temporary:
@@ -1262,10 +1649,10 @@ puts JSON.generate(workflow.fetch("jobs"))
                 (str(temporary_path / "missing-command"),),
                 start_log,
                 [],
-                timeout_seconds=2,
             )
             self.assertEqual(start_error["status"], "start-error")
             self.assertIsNone(start_error["exitCode"])
+            self.assertEqual(start_error["timeoutSeconds"], 1800)
             self.assertIn("could not start gate", start_log.read_text(encoding="utf-8"))
 
             timeout_log = temporary_path / "timeout.log"
@@ -1307,7 +1694,11 @@ time.sleep(30)
                 if not status_path.exists():
                     child_active = False
                     break
-                fields = status_path.read_text(encoding="utf-8").rsplit(") ", 1)
+                try:
+                    fields = status_path.read_text(encoding="utf-8").rsplit(") ", 1)
+                except OSError:
+                    child_active = False
+                    break
                 if len(fields) == 2 and fields[1].startswith("Z "):
                     child_active = False
                     break
@@ -1589,7 +1980,7 @@ time.sleep(30)
             self.assertIn(f"\toptdepends = {package}: {purpose}", srcinfo)
         self.assertEqual(
             set(contract["requiredHostCommands"]),
-            {"omarchy-bluetooth-device", "omarchy-audio-output-set-default"},
+            {"omarchy-bluetooth-device", "omarchy-bluetooth-power", "omarchy-audio-output-set-default"},
         )
         runtime = (ROOT / "scripts/shibumi_suite/runtime.py").read_text(
             encoding="utf-8"

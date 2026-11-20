@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import "core" as Core
 import "core/EntrySettings.js" as EntrySettings
 import "core/GroupRegistry.js" as GroupRegistry
@@ -28,7 +29,7 @@ Item {
   SuiteRuntime.Provider {
     id: barRuntimeProvider
     pluginId: "hancore.shibumi.bar"
-    implementationVersion: "0.1.1-beta.14.1"
+    implementationVersion: "0.2.5"
     owner: root
     host: suiteHostShell.host
     manifest: root.manifest
@@ -57,6 +58,7 @@ Item {
   property bool hostReady: false
   readonly property bool mutationAdmissionReady:
     hostReady && startupAdmissionSatisfied && !shutdownPrepared
+    && GroupRegistry.validNativeLayout(barConfig && barConfig.layout)
   // Consumed only by the process-singleton runtime IPC handler. A handler is
   // admitted after complete host injection and startup, and is revoked before
   // this Bar begins shutdown or whenever Bar ownership overlaps.
@@ -107,6 +109,17 @@ Item {
     layout: { left: [], center: [], right: [] }
   })
   property var layoutConfig: fallbackBarConfig.layout
+  readonly property string trayDrawerDiagnostic: SuiteRuntime.HostContract.trayDrawerDiagnostic
+  readonly property bool trayDrawerDeferred: !!layoutConfig
+    && Array.isArray(layoutConfig.tray) && layoutConfig.tray.length > 0
+  readonly property bool trayDrawerNoticeReady: mutationAdmissionReady && trayDrawerDeferred
+  property bool trayDrawerNoticeLogged: false
+  onTrayDrawerNoticeReadyChanged: {
+    if (trayDrawerNoticeReady && !trayDrawerNoticeLogged) {
+      trayDrawerNoticeLogged = true
+      console.warn(trayDrawerDiagnostic)
+    }
+  }
   property string centerAnchor: ""
   property string position: "top"
   // Quattro keeps this facade surface for stock-widget compatibility, but
@@ -185,11 +198,10 @@ Item {
       suiteHostShell.scoped)
   }
   readonly property string styleId: styleRegistry.resolvedId
-  readonly property var availableStyleIds: styleRegistry.availableIds
-  property color foreground: styleReady ? activeStyle.foreground : Color.bar.text
-  property color barForeground: styleReady ? activeStyle.barForeground : Color.bar.text
-  property color background: styleReady ? activeStyle.background : Color.bar.background
-  property color urgent: styleReady ? activeStyle.urgent : Color.bar.active
+  property color foreground: styleReady ? activeStyle.foreground : Commons.Color.bar.text
+  property color barForeground: styleReady ? activeStyle.barForeground : Commons.Color.bar.text
+  property color background: styleReady ? activeStyle.background : Commons.Color.bar.background
+  property color urgent: styleReady ? activeStyle.urgent : Commons.Color.bar.active
   property string fontFamily: styleReady ? activeStyle.fontFamily : Style.font.family
   readonly property bool injectionComplete: omarchyPath !== ""
     && shell !== null
@@ -222,7 +234,18 @@ Item {
   property real connectedPanelCardWidth: 0
   property real connectedPanelCardHeight: 0
   property var moduleSlots: []
+  property var loadedOwners: []
+  property Component loadedOwnerSentinel: Component {
+    QtObject {
+      id: sentinel
+      required property Item slot
+      required property string screenName
+      Component.onCompleted: root.loadedOwners = root.loadedOwners.concat([sentinel])
+      Component.onDestruction: root.loadedOwners = root.loadedOwners.filter(candidate => candidate !== sentinel)
+    }
+  }
   property var clickTargets: []
+  property bool tearingDown: false
   property var layoutSessions: []
   property var tooltipTarget: null
   property string tooltipText: ""
@@ -240,6 +263,7 @@ Item {
   property var lastProviderUndoReceipt: null
   property var lastCatalogTransitionSnapshot: null
   readonly property alias layoutTransitionBusy: layoutTransition.busy
+  property bool pluginReconcileDeferred: false
   readonly property alias layoutTransitionSerial: layoutTransition.requestSerial
   readonly property alias layoutTransitionResult: layoutTransition.lastResult
   readonly property alias providerSnapshotTransitionBusy:
@@ -359,10 +383,9 @@ Item {
   function hostWidgetConfiguredEnabled(pluginId) {
     const id = validDiagnosticPluginId(pluginId)
     const layout = barConfig && barConfig.layout
-    if (id === "" || !layout) return false
-    for (const region of ["left", "center", "right"]) {
-      const entries = layout[region]
-      if (!Array.isArray(entries)) return false
+    if (id === "" || !GroupRegistry.validNativeLayout(layout)) return false
+    for (const region of GroupRegistry.NativeSections) {
+      const entries = layout[region] || []
       for (let index = 0; index < entries.length; index++) {
         const entry = entries[index]
         if (entryId(entry) === id
@@ -553,8 +576,9 @@ Item {
   }
 
   function inlineSettingsDelta(current, next) {
-    if (!Util.isPlainObject(current) || !Util.isPlainObject(next)) return null
-    const regions = ["left", "center", "right"]
+    if (!GroupRegistry.validNativeLayout(current)
+        || !GroupRegistry.validNativeLayout(next)) return null
+    const regions = GroupRegistry.NativeSections
     const counts = Object.create(null)
     for (let regionIndex = 0; regionIndex < regions.length; regionIndex++) {
       const entries = Array.isArray(next[regions[regionIndex]])
@@ -568,6 +592,8 @@ Item {
     const changes = []
     for (let regionIndex = 0; regionIndex < regions.length; regionIndex++) {
       const region = regions[regionIndex]
+      if (Object.prototype.hasOwnProperty.call(current, region)
+          !== Object.prototype.hasOwnProperty.call(next, region)) return null
       const currentEntries = Array.isArray(current[region])
         ? current[region] : []
       const nextEntries = Array.isArray(next[region]) ? next[region] : []
@@ -607,11 +633,14 @@ Item {
     // same-ID WidgetSlot to invalidate. If any changed entry lacks a live slot,
     // use the structural path rather than leaving that consumer stale.
     for (let changeIndex = 0; changeIndex < changes.length; changeIndex++) {
-      const id = entryId(changes[changeIndex].entry)
+      const change = changes[changeIndex]
+      const id = entryId(change.entry)
       let found = false
       for (let slotIndex = 0; slotIndex < moduleSlots.length; slotIndex++) {
         const slot = moduleSlots[slotIndex]
         if (slot && slot.moduleName === id
+            && (!("nativeSection" in slot)
+              || (slot.nativeSection === change.region && slot.nativeIndex === change.index))
             && typeof slot.applyInlineSettings === "function") {
           found = true
           break
@@ -631,6 +660,8 @@ Item {
       for (let slotIndex = 0; slotIndex < moduleSlots.length; slotIndex++) {
         const slot = moduleSlots[slotIndex]
         if (slot && slot.moduleName === id
+            && (!("nativeSection" in slot)
+              || (slot.nativeSection === change.region && slot.nativeIndex === change.index))
             && typeof slot.applyInlineSettings === "function")
           slot.applyInlineSettings(change.entry)
       }
@@ -638,12 +669,26 @@ Item {
     return true
   }
 
+  function normalizeNativeLayout(layout) {
+    if (!GroupRegistry.validNativeLayout(layout)) return null
+    const result = ({})
+    for (const section of GroupRegistry.NativeSections) {
+      if (GroupRegistry.Regions.indexOf(section) >= 0
+          || Object.prototype.hasOwnProperty.call(layout, section))
+        result[section] = Util.normalizeLayoutSection(layout[section])
+    }
+    return result
+  }
+
   function applyBarConfig() {
     const config = Util.isPlainObject(barConfig) ? barConfig : fallbackBarConfig
+    const nextLayout = normalizeNativeLayout(config.layout)
+    if (!nextLayout) return
     position = normalizePosition(config.position)
     requestedStyleId = String(config.style || "shibumi")
-    centerAnchor = Util.canonicalWidgetId(config.centerAnchor || "")
-    const nextLayout = Util.normalizeLayout(config.layout)
+    centerAnchor = !("centerBegin" in config.layout)
+      && !("centerEnd" in config.layout)
+      ? Util.canonicalWidgetId(config.centerAnchor || "") : ""
     // QML cannot diff reassigned JavaScript layout arrays: replacing one for
     // an inline setting (for example a saved game score) recreates every
     // widget and closes its panel. Match Omarchy's stock host by updating
@@ -776,23 +821,32 @@ Item {
   }
 
   function unassignedLayoutEntries(region) {
-    const entries = GroupRegistry.unassignedEntries(layoutConfig, region)
+    const entries = []
+    for (const section of GroupRegistry.NativeSections)
+      if (GroupRegistry.presentationRegion(section) === region)
+        entries.push(...GroupRegistry.unassignedEntries(layoutConfig, section))
+    const removing = layoutTransitionBusy && layoutTransition.operation
+      && layoutTransition.operation.intent
+      && Array.isArray(layoutTransition.operation.intent.removeIds)
+      ? layoutTransition.operation.intent.removeIds : []
     if (layoutStateController.v2Mode) {
       // G16-G18 use V1 extension slots but remain native fixed groups in V2.
       // Keep their persisted V1 provider entries out of V2's unassigned deck,
       // otherwise the same widget would be rendered twice after a switch.
       return deduplicatedUnassignedEntries(entries.filter(function(entry) {
-        if (isV1AdditionalSuiteWidget(entryId(entry))) return false
-        const groupId = GroupRegistry.dynamicGroupIdForModule(entryId(entry))
+        const id = entryId(entry)
+        if (isV1AdditionalSuiteWidget(id) || removing.indexOf(id) >= 0) return false
+        const groupId = GroupRegistry.dynamicGroupIdForModule(id)
         return groupId === "" || !layoutStateController.groupLocation(groupId)
       }))
     }
     const familyProviders = Object.values(v1FamilySlotBindings)
     return deduplicatedUnassignedEntries(entries.filter(function(entry) {
       const id = entryId(entry)
-      if (familyProviders.indexOf(id) >= 0) return false
+      if (familyProviders.indexOf(id) >= 0 || removing.indexOf(id) >= 0) return false
       const groupId = GroupRegistry.dynamicGroupIdForModule(id)
-      return groupId === "" || !layoutStateController.groupLocation(groupId)
+      return groupId === "" || (!layoutStateController.groupLocation(groupId)
+        && !layoutStateController.v1GroupDisabled(groupId))
     }))
   }
 
@@ -805,13 +859,14 @@ Item {
     const specs = []
     const seen = Object.create(null)
     for (const region of ["left", "center", "right"]) {
-      const entries = Array.isArray(source[region]) ? source[region] : []
+      const entries = GroupRegistry.projectedEntries(source, region)
       for (let index = 0; index < entries.length; index++) {
-        const entry = entries[index]
+        const entry = entries[index].entry
         const id = entryId(entry)
         const hasBarWidget = hasBarWidgetEntryPoint(id)
-        const shibumiModule = Util.isPlainObject(entry)
-          && entry.shibumiModule === true && hasBarWidget
+        const shibumiModule = hasBarWidget && ((Util.isPlainObject(entry)
+          && entry.shibumiModule === true)
+          || (v2Value !== true && v1AdditionalWidgetPlaced(id)))
         const dynamicV2Provider = v2Value === true && hasBarWidget
         if (id === "" || excluded.indexOf(id) >= 0 || seen[id]
             || !Util.isPlainObject(entry)
@@ -850,10 +905,6 @@ Item {
     return v1PluginSpecsForLayout(layoutConfig, excludeValue, includeSpec)
   }
 
-  function v2PluginSpecs(excludeValue, includeSpec) {
-    return v2PluginSpecsForLayout(layoutConfig, excludeValue, includeSpec)
-  }
-
   function activePluginSpecsForLayout(layoutValue, excludeValue, includeSpec) {
     return layoutStateController.v2Mode
       ? v2PluginSpecsForLayout(layoutValue, excludeValue, includeSpec)
@@ -865,10 +916,10 @@ Item {
       layoutConfig, excludeValue, includeSpec)
   }
 
-  function reconcileActivePluginGroups(specs, syncValue, followRegionsValue) {
+  function reconcileActivePluginGroups(specs, syncValue, followRegionsValue, allowPartialValue) {
     if (layoutStateController.v2Mode)
       return layoutStateController.reconcileV2PluginGroups(
-        specs, syncValue, followRegionsValue)
+        specs, syncValue, followRegionsValue, allowPartialValue)
     if (!Array.isArray(specs)) return false
     const bindings = WidgetFamilies.v1SlotBindings(specs,
       layoutStateController.currentV1Order(), pluginRegistry,
@@ -877,7 +928,7 @@ Item {
     return layoutStateController.reconcileV1PluginGroups(
       specs.filter(function(spec) {
         return !spec || familyProviders.indexOf(spec.pluginId) < 0
-      }))
+      }), allowPartialValue)
   }
 
   function reconcileV1PluginGroups() {
@@ -894,15 +945,24 @@ Item {
     // whose provider entry was moved outside the V2 editor. Explicit V2 drag
     // mutations update both stores first, so this does not undo an edit.
     if (!reconcileActivePluginGroups(
-          activePluginSpecs(), true, layoutStateController.v2Mode))
+          activePluginSpecs(), true, layoutStateController.v2Mode, true))
       return false
     return reconcileWidgetFamilyProviders()
   }
 
+  function isDeferredTrayWidget(widgetId) {
+    return GroupRegistry.validNativeLayout(layoutConfig)
+      && (layoutConfig.tray || []).some(entry => entryId(entry) === String(widgetId || ""))
+  }
+
+  function isTrayOnlyWidget(widgetId) {
+    return GroupRegistry.trayOnly(layoutConfig, String(widgetId || ""))
+  }
+
   function layoutContains(widgetId) {
     const id = String(widgetId || "")
-    if (!id) return false
-    for (const region of ["left", "center", "right"]) {
+    if (!id || !GroupRegistry.validNativeLayout(layoutConfig)) return false
+    for (const region of GroupRegistry.NativeSections) {
       const entries = layoutEntries(region)
       for (let index = 0; index < entries.length; index++) {
         if (entryId(entries[index]) !== id) continue
@@ -914,6 +974,15 @@ Item {
       }
     }
     return false
+  }
+
+  // These native V2 widgets can already occupy a V1 extension slot without
+  // the third-party module marker. Membership alone must not invent a slot.
+  function v1AdditionalWidgetPlaced(widgetId) {
+    const id = String(widgetId || "")
+    return !layoutStateController.v2Mode && isV1AdditionalSuiteWidget(id)
+      && GroupRegistry.configuredEntry(layoutConfig, id, true) !== null
+      && layoutStateController.groupLocation("G:" + id) !== null
   }
 
   function hasBarWidgetEntryPoint(widgetId, selectionValue) {
@@ -965,12 +1034,16 @@ Item {
   }
 
   function renderedProviderEntries(layoutValue, region) {
+    // Native conflict inventory includes deferred providers, even aliases.
+    if (region === "tray") return GroupRegistry.validNativeLayout(layoutValue)
+      ? layoutValue.tray || [] : []
     return GroupRegistry.unassignedEntries(layoutValue, region)
   }
 
   function providerFamilyGroupsInLayout(layoutValue) {
     const groups = []
-    for (const region of ["left", "center", "right"]) {
+    for (const region of GroupRegistry.NativeSections) {
+      if (region === "tray") continue  // Deferred entries do not own visible groups.
       const entries = renderedProviderEntries(layoutValue, region)
       for (let index = 0; index < entries.length; index++) {
         const familyGroups = widgetFamilyGroups(entryId(entries[index]))
@@ -987,7 +1060,7 @@ Item {
   function conflictingLayoutProviderIds(widgetId) {
     const id = String(widgetId || "")
     const result = id !== "" ? [id] : []
-    for (const region of ["left", "center", "right"]) {
+    for (const region of GroupRegistry.NativeSections) {
       const entries = renderedProviderEntries(layoutConfig, region)
       for (let index = 0; index < entries.length; index++) {
         const candidateId = entryId(entries[index])
@@ -1002,7 +1075,7 @@ Item {
   function conflictingProviderIdsInLayout(layoutValue) {
     const capabilityOwners = ({})
     const removed = []
-    for (const region of ["left", "center", "right"]) {
+    for (const region of GroupRegistry.NativeSections) {
       const entries = renderedProviderEntries(layoutValue, region)
       for (let index = 0; index < entries.length; index++) {
         const id = entryId(entries[index])
@@ -1042,15 +1115,17 @@ Item {
   }
 
   function currentLayoutSnapshot() {
-    return JSON.parse(JSON.stringify({
-      left: layoutEntries("left"),
-      center: layoutEntries("center"),
-      right: layoutEntries("right")
-    }))
+    return GroupRegistry.validNativeLayout(layoutConfig)
+      ? JSON.parse(JSON.stringify(layoutConfig)) : null
+  }
+
+  function nativeTargetSection(region) {
+    return SuiteRuntime.HostContract.nativeDefaultSection(region,
+      "barSections" in Util ? Util.barSections : undefined)
   }
 
   function planV2DynamicLayout(layoutValue, slotsValue) {
-    if (!Util.isPlainObject(slotsValue) || !Util.isPlainObject(layoutValue)
+    if (!Util.isPlainObject(slotsValue) || !GroupRegistry.validNativeLayout(layoutValue)
         || !["left", "center", "right"].every(region =>
           Array.isArray(layoutValue[region]) && Array.isArray(slotsValue[region]))) return null
     const nextLayout = JSON.parse(JSON.stringify(layoutValue))
@@ -1076,12 +1151,13 @@ Item {
     // Count before moving or reordering so duplicates across regions also
     // fail closed without ever reaching shell-config persistence.
     const actualCounts = Object.create(null)
-    for (const region of ["left", "center", "right"]) {
-      const entries = nextLayout[region]
+    for (const region of GroupRegistry.NativeSections) {
+      const entries = nextLayout[region] || []
       for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
         const moduleId = entryId(entries[entryIndex])
         if (!Object.prototype.hasOwnProperty.call(desiredIds, moduleId))
           continue
+        if (region === "tray") return false
         actualCounts[moduleId] = (actualCounts[moduleId] || 0) + 1
       }
     }
@@ -1096,8 +1172,8 @@ Item {
         const moduleId = desired[index]
         let sourceRegion = ""
         let sourceIndex = -1
-        for (const candidateRegion of ["left", "center", "right"]) {
-          const entries = nextLayout[candidateRegion]
+        for (const candidateRegion of GroupRegistry.NativeSections) {
+          const entries = nextLayout[candidateRegion] || []
           const candidateIndex = entries.findIndex(function(entry) {
             return entryId(entry) === moduleId
           })
@@ -1108,9 +1184,12 @@ Item {
           }
         }
         if (sourceRegion === "") return false
-        if (sourceRegion === region) continue
+        if (GroupRegistry.presentationRegion(sourceRegion) === region) continue
+        const targetSection = nativeTargetSection(region)
+        if (targetSection === "") return false
         const entry = nextLayout[sourceRegion].splice(sourceIndex, 1)[0]
-        nextLayout[region].push(entry)
+        if (!Array.isArray(nextLayout[targetSection])) nextLayout[targetSection] = []
+        nextLayout[targetSection].push(entry)
         changed = true
       }
     }
@@ -1119,26 +1198,22 @@ Item {
     // unassigned entries retain their relative positions and settings.
     for (const region of ["left", "center", "right"]) {
       const desired = desiredByRegion[region]
-      const desiredSet = Object.create(null)
-      for (let index = 0; index < desired.length; index++) {
-        const moduleId = desired[index]
-        desiredSet[moduleId] = true
-        const entries = nextLayout[region]
-        const entryIndex = entries.findIndex(function(entry) {
-          return entryId(entry) === moduleId
-        })
-        if (entryIndex < 0) return false
-        dynamicById[moduleId] = entries[entryIndex]
+      const positions = GroupRegistry.projectedEntries(nextLayout, region)
+        .filter(function(row) { return desired.indexOf(row.id) >= 0 })
+      if (positions.length !== desired.length) return false
+      const sectionById = Object.create(null)
+      for (const row of positions) {
+        dynamicById[row.id] = row.entry
+        sectionById[row.id] = row.section
       }
-      let dynamicIndex = 0
-      for (let entryIndex = 0;
-          entryIndex < nextLayout[region].length; entryIndex++) {
-        const currentId = entryId(nextLayout[region][entryIndex])
-        if (!desiredSet[currentId]) continue
-        if (dynamicIndex >= desired.length) return false
-        const desiredId = desired[dynamicIndex++]
-        if (currentId === desiredId) continue
-        nextLayout[region][entryIndex] = dynamicById[desiredId]
+      for (let index = 0; index < positions.length; index++) {
+        const position = positions[index]
+        const desiredId = desired[index]
+        // The three-region editor cannot express a native center boundary.
+        // Refuse cross-boundary swaps rather than silently remapping entries.
+        if (sectionById[desiredId] !== position.section) return false
+        if (position.id === desiredId) continue
+        nextLayout[position.section][position.index] = dynamicById[desiredId]
         changed = true
       }
     }
@@ -1152,9 +1227,9 @@ Item {
     if (intent.kind === "provider-snapshot") {
       const snapshotLayout = intent.layout
       const expectedCurrent = intent.expectedCurrentLayout
-      if (!Util.isPlainObject(layoutValue)
-          || !Util.isPlainObject(snapshotLayout)
-          || !Util.isPlainObject(expectedCurrent)
+      if (!GroupRegistry.validNativeLayout(layoutValue)
+          || !GroupRegistry.validNativeLayout(snapshotLayout)
+          || !GroupRegistry.validNativeLayout(expectedCurrent)
           || !["left", "center", "right"].every(function(region) {
             return Array.isArray(layoutValue[region])
               && Array.isArray(snapshotLayout[region])
@@ -1164,35 +1239,56 @@ Item {
             layoutValue, expectedCurrent)) return null
       return JSON.parse(JSON.stringify(snapshotLayout))
     }
-    if (intent.kind !== "catalog-layout" || !Util.isPlainObject(layoutValue)
+    if (intent.kind !== "catalog-layout" || !GroupRegistry.validNativeLayout(layoutValue)
         || !["left", "center", "right"].every(function(region) {
           return Array.isArray(layoutValue[region])
         })) return null
     const id = String(intent.id || "")
     const region = String(intent.region || "")
     if (!LayoutModel.validPluginId(id)
-        || ["left", "center", "right"].indexOf(region) < 0
+        || GroupRegistry.NativeSections.indexOf(region) < 0
         || typeof intent.installed !== "boolean"
         || !Array.isArray(intent.removeIds)
         || intent.removeIds.some(function(value) {
           return !LayoutModel.validPluginId(value)
         })) return null
+    if (region === "tray" || (layoutValue.tray || []).some(entry =>
+        intent.removeIds.indexOf(entryId(entry)) >= 0
+          || (intent.installed && entryId(entry) === id))) return null
     const next = JSON.parse(JSON.stringify(layoutValue))
-    let retained = null
-    for (const part of ["left", "center", "right"]) {
+    let retained = false
+    const relocated = []
+    for (const part of GroupRegistry.NativeSections) {
+      if (!Object.prototype.hasOwnProperty.call(next, part)) continue
       next[part] = next[part].filter(function(entry) {
         const entryValue = entryId(entry)
-        if (entryValue === id && retained === null) retained = entry
+        if (intent.installed && entryValue === id) {
+          if (GroupRegistry.presentationRegion(part)
+              === GroupRegistry.presentationRegion(region)) return true
+          relocated.push(entry)
+          return false
+        }
         return intent.removeIds.indexOf(entryValue) < 0
+      }).map(function(entry) {
+        if (!intent.installed || entryId(entry) !== id) return entry
+        // Re-selection updates the native entry in place, never its default.
+        retained = true
+        const configured = Util.isPlainObject(entry) ? entry : {id: id}
+        configured.shibumiModule = true
+        return configured
       })
     }
     if (intent.installed) {
-      const entry = retained && Util.isPlainObject(retained)
-        ? JSON.parse(JSON.stringify(retained)) : {id: id}
-      entry.id = id
-      entry.shibumiModule = true
-      next[region].push(entry)
+      // Only an explicit cross-region move or a new placement uses the target.
+      if (!retained && relocated.length === 0) relocated.push({id: id})
+      if (relocated.length > 0 && !Array.isArray(next[region])) next[region] = []
+      for (const entry of relocated) {
+        const configured = Util.isPlainObject(entry) ? entry : {id: id}
+        configured.shibumiModule = true
+        next[region].push(configured)
+      }
     } else if (intent.keepConfigured === true) {
+      if (!Array.isArray(next[region])) next[region] = []
       next[region].push({id: id})
     }
     return next
@@ -1248,7 +1344,7 @@ Item {
     const config = Util.isPlainObject(barConfig) ? barConfig : null
     const layout = config && Util.isPlainObject(config.layout)
       ? config.layout : null
-    if (!layout || !["left", "center", "right"].every(function(region) {
+    if (!GroupRegistry.validNativeLayout(layout) || !["left", "center", "right"].every(function(region) {
       return Array.isArray(layout[region])
     })) return null
     return JSON.parse(JSON.stringify(layout))
@@ -1313,7 +1409,7 @@ Item {
 
   function restoreProviderLayoutSnapshot(snapshotValue) {
     if (!mutationAdmissionReady || !Util.isPlainObject(snapshotValue)
-        || !Util.isPlainObject(snapshotValue.layout)
+        || !GroupRegistry.validNativeLayout(snapshotValue.layout)
         || !Util.isPlainObject(snapshotValue.groupStates)) return false
     const layout = snapshotValue.layout
     for (const region of ["left", "center", "right"]) {
@@ -1363,10 +1459,13 @@ Item {
   }
 
   function layoutWithoutProviderIds(layoutValue, providerIds) {
-    const source = Util.isPlainObject(layoutValue) ? layoutValue : ({})
+    if (!GroupRegistry.validNativeLayout(layoutValue)) return null
+    const source = layoutValue
     const ids = Array.isArray(providerIds) ? providerIds : []
-    const result = { left: [], center: [], right: [] }
-    for (const region of ["left", "center", "right"]) {
+    if ((source.tray || []).some(entry => ids.indexOf(entryId(entry)) >= 0)) return null
+    const result = JSON.parse(JSON.stringify(source))
+    for (const region of GroupRegistry.NativeSections) {
+      if (!Object.prototype.hasOwnProperty.call(source, region)) continue
       const entries = Array.isArray(source[region]) ? source[region] : []
       result[region] = entries.filter(function(entry) {
         return ids.indexOf(entryId(entry)) < 0
@@ -1464,6 +1563,34 @@ Item {
     return setWidgetGroupVariantStates(states)
   }
 
+  function v1FixedGroupUnplaced(groupId) {
+    const order = layoutStateController.currentV1Order()
+    return LayoutModel.GroupIds.indexOf(groupId) >= 0
+      && (order.parked || []).indexOf(groupId) >= 0
+  }
+
+  function v1FixedGroupEnablePlan(groupId) {
+    const service = layoutStateController.stateService
+    if (layoutStateController.v2Mode || !mutationAdmissionReady
+        || layoutTransitionBusy || providerSnapshotTransitionBusy
+        || stateTransitionBusy || !service || service.ready !== true
+        || service.writePending !== false || !v1FixedGroupUnplaced(groupId))
+      return null
+    const scope = {familyStates: {}}
+    scope.familyStates[groupId] = {v1: null, v2: null}
+    const snapshot = service.layoutFamilySnapshot(scope)
+    if (!snapshot) return null
+    const states = snapshot.familyStates
+    states[groupId].v1 = true
+    const planned = v1CatalogPlan(currentLayoutSnapshot(), states)
+    return planned ? {layout: planned, states: states} : null
+  }
+
+  function v1FixedGroupPlacementFull(groupId) {
+    const planned = v1FixedGroupEnablePlan(groupId)
+    return !!planned && planned.layout.unplaced.indexOf(groupId) >= 0
+  }
+
   function requestWidgetGroupStateTransition(groupId, variantValue, enabled) {
     if (!mutationAdmissionReady) return false
     const group = String(groupId || "")
@@ -1473,6 +1600,15 @@ Item {
         || stateTransitionBusy || GroupRegistry.GroupIds.indexOf(group) < 0
         || ["v1", "v2"].indexOf(variant) < 0
         || typeof enabled !== "boolean") return false
+    if (variant === "v1" && enabled && v1FixedGroupUnplaced(group)) {
+      const planned = v1FixedGroupEnablePlan(group)
+      return !!planned && planned.layout.unplaced.length === 0
+        && stateTransition.request({v1Layout: {
+          order: planned.layout.order, splits: planned.layout.splits
+        }, familyStates: planned.states}, {
+          kind: "state-only", group: group, variant: variant, enabled: true
+        })
+    }
     const states = widgetGroupVariantStates([group])
     const stateService = layoutStateController.stateService
     if (!states || !stateService || stateService.ready !== true
@@ -1515,6 +1651,34 @@ Item {
     return groups.length === 0 || setWidgetGroupVariantStates(stateValues)
   }
 
+  function v1CatalogPlan(nextLayout, stateValues) {
+    const specs = v1PluginSpecsForLayout(nextLayout)
+    const bindings = WidgetFamilies.v1SlotBindings(specs,
+      layoutStateController.currentV1Order(), pluginRegistry,
+      catalogObservation, suiteHostShell.scoped)
+    const providers = Object.values(bindings)
+    return layoutStateController.planV1PluginGroups(specs.filter(function(spec) {
+      return spec && providers.indexOf(spec.pluginId) < 0
+    }), stateValues)
+  }
+
+  function v1CatalogPlacementFull(widgetId, region) {
+    const service = layoutStateController.stateService
+    if (layoutStateController.v2Mode || !mutationAdmissionReady
+        || layoutTransitionBusy || !service || service.ready !== true
+        || service.writePending !== false) return false
+    const id = String(widgetId || "")
+    const next = planNativeTransition(currentLayoutSnapshot(), {
+      kind: "catalog-layout", id: id, installed: true, region: nativeTargetSection(region),
+      removeIds: conflictingLayoutProviderIds(id)
+    })
+    if (!next) return false
+    const states = ({})
+    states["G:" + id] = {v1: true}
+    const planned = v1CatalogPlan(next, states)
+    return !!planned && planned.unplaced.indexOf(id) >= 0
+  }
+
   function catalogLayoutPatch(nextLayout, stateValues) {
     if (!Util.isPlainObject(nextLayout)) return null
     const specs = activePluginSpecsForLayout(nextLayout)
@@ -1525,15 +1689,7 @@ Item {
       if (!planned || planned.unplaced.length > 0) return null
       patch.v2Layout = planned.layout
     } else {
-      const order = layoutStateController.currentV1Order()
-      const splits = layoutStateController.currentV1Splits(order)
-      const bindings = WidgetFamilies.v1SlotBindings(specs, order,
-        pluginRegistry, catalogObservation, suiteHostShell.scoped)
-      const providers = Object.values(bindings)
-      const planned = LayoutModel.reconcilePluginGroups(order, splits,
-        specs.filter(function(spec) {
-          return spec && providers.indexOf(spec.pluginId) < 0
-        }))
+      const planned = v1CatalogPlan(nextLayout, stateValues)
       if (!planned || planned.unplaced.length > 0) return null
       patch.v1Layout = {order: planned.order, splits: planned.splits}
     }
@@ -1552,8 +1708,8 @@ Item {
       if (!row || row.id !== id || !Array.isArray(row.kinds)
           || row.kinds.indexOf("bar-widget") < 0) return null
     }
-    const targetRegion = WidgetFamilies.targetRegion(id, region,
-      pluginRegistry, catalogObservation, suiteHostShell.scoped)
+    const targetSection = nativeTargetSection(WidgetFamilies.targetRegion(id, region,
+      pluginRegistry, catalogObservation, suiteHostShell.scoped))
     const removeIds = installed === true
       ? conflictingLayoutProviderIds(id) : [id]
     const affectedGroups = widgetFamilyGroups(id)
@@ -1563,7 +1719,7 @@ Item {
     }
     const current = currentLayoutSnapshot()
     const intent = {kind: "catalog-layout", id: id,
-      installed: installed === true, region: targetRegion,
+      installed: installed === true, region: targetSection,
       removeIds: removeIds, keepConfigured: installed !== true
         && isV1AdditionalSuiteWidget(id),
       providerGroups: affectedGroups.slice()}
@@ -1574,6 +1730,18 @@ Item {
     for (const group of affectedGroups)
       states[group] = {v1: owned.indexOf(group) < 0,
         v2: owned.indexOf(group) < 0}
+    if (!layoutStateController.v2Mode && isV1AdditionalSuiteWidget(id)) {
+      const group = "G:" + id
+      const service = layoutStateController.stateService
+      if (!service || typeof service.layoutFamilySnapshot !== "function")
+        return null
+      const scope = {familyStates: {}}
+      scope.familyStates[group] = {v1: null, v2: null}
+      const snapshot = service.layoutFamilySnapshot(scope)
+      if (!snapshot || !snapshot.familyStates) return null
+      states[group] = {v1: installed === true,
+        v2: snapshot.familyStates[group].v2}
+    }
     const patch = catalogLayoutPatch(next, states)
     return patch ? {patch: patch, intent: intent} : null
   }
@@ -1603,7 +1771,11 @@ Item {
     const row = snapshot && snapshot.byId
       && Object.prototype.hasOwnProperty.call(snapshot.byId, id)
       ? snapshot.byId[id] : null
-    return !!(row && row.id === id && row.enabled === false
+    return !!(row && row.id === id
+      && (row.enabled === false || (row.enabled === true
+        && !layoutStateController.v2Mode
+        && isV1AdditionalSuiteWidget(id) && !v1AdditionalWidgetPlaced(id)
+        && registeredWidgetComponent(id) !== null))
       && Array.isArray(row.kinds) && row.kinds.indexOf("bar-widget") >= 0)
   }
 
@@ -1644,10 +1816,11 @@ Item {
     // original would tell Omarchy to restore the source and remove the clone.
     if (id !== requestedId && JSON.stringify(widgetFamilyGroups(id).sort())
         !== JSON.stringify(widgetFamilyGroups(requestedId).sort())) return false
-    const targetRegion = WidgetFamilies.targetRegion(
-      id, region, pluginRegistry, catalogObservation, suiteHostShell.scoped)
+    const targetSection = nativeTargetSection(WidgetFamilies.targetRegion(
+      id, region, pluginRegistry, catalogObservation, suiteHostShell.scoped))
+    const targetRegion = GroupRegistry.presentationRegion(targetSection)
     const familyGroups = widgetFamilyGroups(id)
-    if (!id || !shell || typeof shell.mutateShellConfig !== "function")
+    if (!id || !targetRegion || !shell || typeof shell.mutateShellConfig !== "function")
       return false
     // V1's fixed family slot has one provider identity, not instance keys.
     // Refuse an ambiguous multi-instance replacement before changing layout,
@@ -1659,8 +1832,8 @@ Item {
 
     const previousSpecs = activePluginSpecs()
     const previousLayout = currentLayoutSnapshot()
-    const existingEntries = ["left", "center", "right"].reduce(
-      (entries, part) => entries.concat(previousLayout[part].filter(
+    const existingEntries = GroupRegistry.NativeSections.reduce(
+      (entries, part) => entries.concat((previousLayout[part] || []).filter(
         entry => entryId(entry) === id)), [])
     if (installed === true && !widgetAllowsMultiple(id, selection)
         && existingEntries.length > 1) return false
@@ -1681,15 +1854,18 @@ Item {
           displacedGroups.push(groups[groupIndex])
       }
     }
-    const nextLayout = layoutWithoutProviderIds(
+    let nextLayout = layoutWithoutProviderIds(
       previousLayout, replacedProviderIds)
+    if (!nextLayout) return false
+    if (!Array.isArray(nextLayout[targetSection])) nextLayout[targetSection] = []
     if (installed === true) {
-      const entry = existingEntries.length === 1 && Util.isPlainObject(existingEntries[0])
-        ? JSON.parse(JSON.stringify(existingEntries[0])) : { id: id }
-      entry.shibumiModule = true
-      nextLayout[targetRegion].push(entry)
+      nextLayout = planNativeTransition(previousLayout, {
+        kind: "catalog-layout", id: id, installed: true,
+        region: targetSection, removeIds: replacedProviderIds
+      })
+      if (!nextLayout) return false
     } else if (isV1AdditionalSuiteWidget(id))
-      nextLayout[targetRegion].push({ id: id })
+      nextLayout[targetSection].push({ id: id })
     const nextOwnedGroups = providerFamilyGroupsInLayout(nextLayout)
     const stateValues = ({})
     if (installed === true) {
@@ -1718,8 +1894,8 @@ Item {
     if (installed === true && registryWasEnabled !== true
         && (!pluginRegistry || typeof pluginRegistry.setEnabled !== "function"))
       return false
-    const desiredSpecs = activePluginSpecs(replacedProviderIds,
-      installed === true ? { id: id, region: targetRegion } : null)
+    const desiredSpecs = activePluginSpecsForLayout(nextLayout,
+      installed === true ? [] : replacedProviderIds)
     if (!reconcileActivePluginGroups(
           desiredSpecs, false, layoutStateController.v2Mode))
       return false
@@ -1766,7 +1942,7 @@ Item {
 
   function applyProviderLayoutTransaction(nextLayout, desiredSpecs,
       stateValues) {
-    if (!legacyFamilyMutationAllowed()) return false
+    if (!legacyFamilyMutationAllowed() || !GroupRegistry.validNativeLayout(nextLayout)) return false
     if (!shell || typeof shell.mutateShellConfig !== "function") return false
     const previousSpecs = activePluginSpecs()
     const previousLayout = currentLayoutSnapshot()
@@ -1824,7 +2000,7 @@ Item {
   function widgetFamilyAlternativesInstalled(groupId) {
     const group = String(groupId || "")
     if (GroupRegistry.GroupIds.indexOf(group) < 0) return false
-    for (const region of ["left", "center", "right"]) {
+    for (const region of GroupRegistry.NativeSections) {
       const entries = renderedProviderEntries(layoutConfig, region)
       for (let index = 0; index < entries.length; index++) {
         if (widgetFamilyGroups(entryId(entries[index])).indexOf(group) >= 0)
@@ -1949,8 +2125,11 @@ Item {
     let changed = false
     shell.mutateShellConfig(function(config) {
       if (!Util.isPlainObject(config.bar)
-          || !Util.isPlainObject(config.bar.layout)) return
-      for (const section of ["left", "center", "right"]) {
+          || !GroupRegistry.validNativeLayout(config.bar.layout)) return
+      if ((config.bar.layout.tray || []).some(entry =>
+          family.alternatives.indexOf(entryId(entry)) >= 0)) return
+      for (const section of GroupRegistry.NativeSections) {
+        if (!Object.prototype.hasOwnProperty.call(config.bar.layout, section)) continue
         const source = Array.isArray(config.bar.layout[section])
           ? config.bar.layout[section] : []
         const filtered = source.filter(function(entry) {
@@ -2249,6 +2428,14 @@ Item {
     moduleSlots = moduleSlots.filter(item => item !== slot)
   }
 
+  function widgetSlotLoadAdmitted(slot) {
+    return widgetAllowsMultiple(slot.moduleName) || !loadedOwners.some(candidate =>
+      candidate.objectName === slot.moduleName && candidate.screenName === slot.screenName && candidate.slot !== slot)
+  }
+  function claimLoadedOwner(slot, item) {
+    if (!widgetSlotLoadAdmitted(slot)) return false
+    return !!loadedOwnerSentinel.createObject(item, {slot, objectName: slot.moduleName, screenName: slot.screenName})
+  }
   function registerClickTarget(target) {
     if (!target || clickTargets.indexOf(target) !== -1) return
     const next = clickTargets.slice()
@@ -2371,14 +2558,6 @@ Item {
       if (items[i].opened === true) return true
     }
     return false
-  }
-
-  function barWidgetPage(pluginId, fallbackPage) {
-    const widget = findPanelWidget(pluginId)
-    return widget && widget.panelLoaded === true && widget.panelItem
-      && widget.panelItem.settingsPage !== undefined
-      ? String(widget.panelItem.settingsPage || fallbackPage || "")
-      : String(fallbackPage || "")
   }
 
   function scheduleOpenControlCenterRestores(page, needsReplacement,
@@ -2704,18 +2883,14 @@ Item {
 
   function widgetRestoreSatisfied(record, widget) {
     if (!record || !widget || widget.opened !== true) return false
-    // A V1/V2 change replaces the WidgetSlot owner. The outgoing owner can
-    // remain alive long enough to satisfy an early timer tick, then disappear
-    // after the restore has already stopped. Only the replacement owner may
-    // complete a variant-switch restore.
-    if (record.needsReplacement && widget === record.owner) return false
-    // Once the replacement owner is established, navigation belongs to the
+    // Once an owner is established, navigation belongs to the
     // user. Follow its current page instead of forcing the page captured at
     // switch time; if this owner is replaced again, that latest page becomes
     // the handoff target for its successor.
     if (widget === record.activeOwner) {
-      if (record.id === "hancore.shibumi.control-center"
-          && widget.panelLoaded === true && widget.panelItem) {
+      if (record.id === "hancore.shibumi.control-center") {
+        if (widget.panelLoaded !== true || !widget.panelItem
+            || widget.panelItem.settingsPageReady !== true) return false
         const currentPage = String(widget.panelItem.settingsPage || "")
         if (currentPage !== "") record.page = currentPage
       }
@@ -2727,6 +2902,7 @@ Item {
       return true
     }
     const pageReady = widget.panelLoaded === true && widget.panelItem
+      && widget.panelItem.settingsPageReady === true
       && String(widget.panelItem.settingsPage || "") === record.page
     if (pageReady) record.activeOwner = widget
     return pageReady
@@ -2749,7 +2925,7 @@ Item {
         if (record.waitingWrites && record.waitingWrites.length) continue
         record.restoreRevision = Number(record.restoreRevision || 0) + 1
         record.attempts = Number(record.attempts || 0) + 1
-        // Never let a missing replacement owner fall back to another output.
+        // Never let a missing owner fall back to another output.
         const widget = root.findPanelWidgetOnScreen(
           record.id, record.screenName)
         const satisfied = root.widgetRestoreSatisfied(record, widget)
@@ -2765,7 +2941,9 @@ Item {
         // Filesystem-backed config publication and the layout delegate rebuild
         // can replace the panel owner more than once. Keep each output-local
         // handoff alive for its full 1.6 s window.
-        const current = root.pendingWidgetRestores.indexOf(record)
+        const current = root.pendingWidgetRestores.findIndex(item =>
+          item.restoreId === record.restoreId
+            && item.restoreRevision === record.restoreRevision)
         if (current >= 0 && record.attempts >= 20) root.removeWidgetRestoreAt(current)
       }
       // openPage()/open() can synchronously cancel or schedule another restore.
@@ -2856,7 +3034,7 @@ Item {
       ? layoutConfig : ({})
     let expectedTruncated = false
     let inspectedEntries = 0
-    for (const region of ["left", "center", "right"]) {
+    for (const region of GroupRegistry.NativeSections) {
       const entries = Array.isArray(configuredLayout[region])
         ? configuredLayout[region] : []
       for (let index = 0; index < entries.length; index++) {
@@ -3143,6 +3321,7 @@ Item {
     scheduleStartupAdmission()
   }
   Component.onDestruction: {
+    tearingDown = true
     prepareForShutdown()
     releaseCatalogConsumer()
   }
@@ -3159,8 +3338,10 @@ Item {
     interval: 1
     repeat: false
     onTriggered: {
-      if (!root.shutdownPrepared && root.hostReady)
-        root.reconcileActivePluginGroupsAndProviders()
+      if (root.shutdownPrepared || !root.hostReady) return
+      // Remember a reconcile the busy store refuses; the mutable store re-arms it once.
+      root.pluginReconcileDeferred = layoutStateController.mutationBusy
+      if (!root.pluginReconcileDeferred) root.reconcileActivePluginGroupsAndProviders()
     }
   }
 
@@ -3175,6 +3356,14 @@ Item {
 
     function onV2ModeChanged() {
       if (!root.shutdownPrepared) v1PluginReconcileTimer.restart()
+    }
+
+    // A background reconcile skipped while a State write or layout
+    // transition was busy must run again once the store is mutable.
+    function onMutationBusyChanged() {
+      if (!root.shutdownPrepared && !layoutStateController.mutationBusy
+          && root.pluginReconcileDeferred)
+        v1PluginReconcileTimer.restart()
     }
   }
 
@@ -3226,6 +3415,9 @@ Item {
     admitted: root.restoreAdmitted && !providerSnapshotTransition.busy
       && !stateTransition.busy
     onSettledContext: function(serial, result, context) {
+      // Qt 6.12 marshals nested signal arrays as sequences; keep validators strict.
+      if (context !== null && context !== undefined)
+        context = JSON.parse(JSON.stringify(context))
       root.lastProviderUndoReceipt = null
       const intent = context && context.intent ? context.intent : null
       const saved = root.lastCatalogTransitionSnapshot
@@ -3517,7 +3709,9 @@ Item {
   Process {
     id: barHiddenProbe
     running: root.hostReady
-    command: ["bash", "-lc", "echo -n \"off:\"; [[ -f $HOME/.local/state/omarchy/toggles/bar-off ]] && echo -n yes || echo -n no; echo -n \",auto:\"; [[ -f $HOME/.local/state/omarchy/toggles/bar-autohide ]] && echo yes || echo no"]
+    // Personal fork: report bar-off (or upstream's legacy bar-hidden alias) and
+    // auto-hide separately, so the reveal sensor can tell them apart.
+    command: ["bash", "-lc", "echo -n \"off:\"; [[ -f " + SuiteRuntime.HostContract.path("$HOME", "barOffMarker") + " || -f " + SuiteRuntime.HostContract.path("$HOME", "barHiddenMarker") + " ]] && echo -n yes || echo -n no; echo -n \",auto:\"; [[ -f " + SuiteRuntime.HostContract.path("$HOME", "togglesDir") + "/bar-autohide ]] && echo yes || echo no"]
     stdout: SplitParser {
       onRead: line => {
         const str = String(line).trim()
@@ -3534,7 +3728,7 @@ Item {
   }
 
   FileView {
-    path: root.hostReady ? root.home + "/.local/state/omarchy/toggles" : ""
+    path: root.hostReady ? SuiteRuntime.HostContract.path(root.home, "togglesDir") : ""
     watchChanges: true
     printErrors: false
     onFileChanged: root.requestBarHiddenProbe()

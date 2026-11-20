@@ -17,11 +17,17 @@ components: no service, Process, Timer, poller, worker, backend, persistence,
 singleton, or mutable runtime authority. Every presentation consumer declares
 a direct State dependency, and State precedes those consumers in suite order.
 
-`ShibumiPanel.qml` is not passive because it retains three focus/popout
-lifecycle timers. It therefore remains the sole canonical source under
-`shared/presentation/`; `scripts/sync-shared.sh` continues to drift-check its
-existing plugin and `widgets/` copies. Bar-host and feature-owner sources
-otherwise live directly in their plugin roots.
+`ShibumiPanel.qml` retains its three focus/popout lifecycle timers and checked
+copies from `shared/presentation/`. `scripts/sync-shared.sh` also mirrors
+`shared/runtime/HostWidgetEmbed.qml` into Center, Status, Audio and Brightness.
+This local helper type-checks host handles without typed intermediate storage,
+preserves resolver refusals and resident children for the same owner/handle/URL;
+a real owner change revokes and reloads. Shutdown destroys children while their
+injected facade is still valid, then clears the loader records. Submission retries are bounded to ten
+existing consumer wakeups; it adds no timer or deferred feedback path. The
+proxies remain local, and Monitor's visual lease does not replace its backend
+owner. These separately registered plugins still require the complete admitted
+suite; this is checked vendoring, not another cross-plugin import exception.
 Installation, update, repair and removal continue to operate on the complete
 admitted suite. This dependency does not grant permission to weaken admission,
 load a partial mixed-version set, or import arbitrary sibling/repository paths.
@@ -87,9 +93,13 @@ revoke a configured bar-only widget during the first `shell.json` mutation.
 The Runtime therefore owns one process-bound startup prime for an admitted
 scoped Bar. There is no later output-recovery rescan or lock IPC probe. After
 the State service, payload marker, exact Bar provider, and host facade are
-admitted, the startup prime runs the public host call
-`/usr/bin/quickshell ipc --pid <own-pid> call -- shell rescanPlugins` with a
-fixed argument vector. It does not interpret command output as authority.
+admitted, the startup prime probes `/usr/bin/quickshell ipc --pid <own-pid> show`
+and chooses `reloadPlugins` only if target `shell` lists
+`function reloadPlugins(): void`, otherwise `rescanPlugins`. The same Process then
+runs `/usr/bin/quickshell ipc --pid <own-pid> call -- shell <chosen-call>` with a
+fixed argument vector; output selects only these two built-in calls, never supplies
+arguments or grants readiness. The existing deadline covers both probe and call;
+a nonzero exit remains terminal, and a replacement Bar lease is still required.
 
 The first Bar remains not ready and has no output or catalog consumer. Its
 shared mutation admission also rejects shell-config, layout, State appearance,
@@ -193,6 +203,12 @@ separate gates. The runtime coordinator is not the persistence owner.
 one existing own-entry commit. It accepts a nonempty selection of `v1Layout`
 (`order` and `splits` together), `v2Layout`, `v2Boundaries`, `separators` (group to
 boolean/null), and `familyStates` (group to complete `v1`/`v2` boolean/null pair).
+The V1 order may additionally carry `parked`: a bounded, unique list of fixed
+G1-G15 identities displaced from disabled extra slots. Placed and parked sets
+are disjoint and together retain every fixed identity. It is not another slot
+region or swap provenance. State refuses writes leaving a parked identity
+V1-enabled; reactivation therefore includes placement in the same atomic patch.
+V2 never accepts this field; schema 1 and existing layouts remain unchanged.
 Null restores field absence, not explicit false. Unknown fields, invalid layouts,
 non-string slot IDs and incomplete pairs refuse the whole patch. The bounded
 widget normalizer must retain the complete affected projection; partial
@@ -280,13 +296,20 @@ listPlugins`; separate bounded `/proc` checks bind that PID to the injected
 `id/name/kinds/enabled/active/canDisable/firstParty/clonedFrom` identity and adds
 only bounded display/search metadata from the matching package manifest. It is
 not an `installedPlugins` manifest map, component resolver, settings store or
-native revision. Manifest discovery is count/byte/probe bounded; every path
-component and final file is opened without following symlinks, and changed or
-ambiguous files refuse publication. This enrichment grants no mutation right:
+native revision. Manifest discovery is count/byte/probe bounded. Third-party
+plugin directories may resolve through symlinks, matching the registry's scan;
+the resolved directory is opened component-wise without following further links.
+Manifest files still require no-follow, bounded, stable, single-link regular-file
+reads. Invalid, unreadable, missing or ambiguous metadata removes only that row's
+presentation fields and supplies a `catalogIssue` code; its native fields remain.
+When an unreadable manifest has no attributable ID, the unmatched row reports
+`metadata-missing` rather than guessing its identity. Identity, IPC, native DTO
+shape, stale-catalog and resource-limit failures still refuse the whole catalog.
+This enrichment grants no mutation right:
 a current exact host component selection is revalidated before activation, so
 `defaultSection` can only suggest placement after that authority exists. Native
-ordering is retained. Empty-but-valid is ready; malformed, ambiguous or
-unavailable is not. JSON keys and catalog IDs must be unique; booleans, Unicode,
+ordering is retained. Empty-but-valid and metadata-degraded catalogs are ready;
+malformed native identity or unavailable transport is not. JSON keys and catalog IDs must be unique; booleans, Unicode,
 structural depth and sizes are checked before publication.
 Ancestry must complete within one immutable current observation and 32 entries,
 without missing or cyclic parents, mixed `entries`/`byId` rows, or inherited
@@ -316,7 +339,10 @@ bytes and three seconds; strict UTF-8/JSON rejects duplicate keys and nonfinite
 values. The native shell PID selects the IPC server; bounded `/proc` identity
 checks bind that PID to the exact shell directory before and after the read, so
 an overlapping older instance of the same path cannot answer. It exposes no
-native stderr. The QML command owns a five-second one-shot
+native stderr; refusal emits one path-free code token, forwarded to the catalog
+error state and existing page/action text. Status and Health each use one helper
+invocation (including its unchanged-snapshot verification), not an additional
+registry scan, and warn once for refusal or per-row degradation. The QML command owns a five-second one-shot
 deadline and TERM-to-KILL cancellation with a 1.5-second grace. A separate
 short-lived custodian owns the IPC process group, permits launch only after its
 ready/start handshake and retains group identity until cleanup. Launcher death,

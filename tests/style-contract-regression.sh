@@ -298,13 +298,46 @@ for dynamic_v1_contract in \
   rg -Fq "$dynamic_v1_contract" hancore.shibumi.bar/core/GroupSlot.qml \
     || fail "dynamic V1 plugins lost standard pill chrome: $dynamic_v1_contract"
 done
-for edit_surface_contract in \
-  'implicitHeight: !bar.vertical && validScreen ? screen.height : 0' \
-  'mask: Region {' \
-  'onClicked: dragSession.setEditing(false)'; do
-  rg -Fq "$edit_surface_contract" hancore.shibumi.bar/core/BarPanel.qml \
-    || fail "stable V1 edit surface drifted: $edit_surface_contract"
+for bar_window_contract in \
+  'implicitHeight: !bar.vertical && validScreen ? bar.barSize + shadowPadding : 0' \
+  'implicitWidth: bar.vertical && validScreen ? bar.barSize : 0' \
+  'exclusiveZone: bar.barExclusiveSize' \
+  'WlrLayershell.keyboardFocus: dragSession.editing' \
+  'visible: dragSession.editing' \
+  'z: 1'; do
+  rg -Fq "$bar_window_contract" hancore.shibumi.bar/core/BarPanel.qml \
+    || fail "bar-local edit surface drifted: $bar_window_contract"
 done
+awk '/^[[:space:]]*id: barSurfaceLoader$/,/^  }$/' hancore.shibumi.bar/core/BarPanel.qml \
+  | rg -Uq '^    width: parent\.width\n    height: barWindow\.bar\.vertical \? parent\.height : barWindow\.bar\.barSize$' \
+  || fail "bar surface loader must retain its edge-local layout and input box"
+if rg -q 'MouseArea \{' hancore.shibumi.bar/core/BarPanel.qml \
+  || ! rg -Fxq '  mask: Region { item: barSurfaceLoader }' hancore.shibumi.bar/core/BarPanel.qml; then
+  fail "bar window lost its restricted edge-local input region"
+fi
+for backdrop_contract in \
+  'id: editBackdropLoader' \
+  'active: dragSession.editing' \
+  '&& barWindow.visible && barWindow.backingWindowVisible' \
+  '&& barWindow.validScreen && !barWindow.bar.barHidden' \
+  '&& windowRecovery.recoveryVisible' \
+  'EditBackdropPanel {' \
+  'visible: layoutSession.editing && barVisible' \
+  'readonly property real outsideY: bar.position === "top" ? bar.barSize : 0' \
+  '? Math.max(0, height - bar.barSize) : height' \
+  'WlrLayershell.layer: WlrLayer.Top' \
+  'WlrLayershell.keyboardFocus: WlrKeyboardFocus.None' \
+  'mask: Region { item: dismissArea }' \
+  'y: root.outsideY' \
+  'height: root.outsideHeight' \
+  'onClicked: root.layoutSession.setEditing(false)'; do
+  rg -Fq "$backdrop_contract" \
+    hancore.shibumi.bar/core/BarPanel.qml \
+    hancore.shibumi.bar/core/EditBackdropPanel.qml \
+    || fail "edit-only backdrop contract drifted: $backdrop_contract"
+done
+[[ $(rg -c 'EditBackdropPanel \{' hancore.shibumi.bar/core/BarPanel.qml) -eq 1 ]] \
+  || fail "bar output must declare one edit-only backdrop component"
 rg -Fq 'readonly property real appearancePadding: v2Shell && bar.visualTokens' \
   hancore.shibumi.bar/core/GroupSlot.qml \
   || fail "V2 widget padding leaked into the original V1 group geometry"
@@ -581,8 +614,14 @@ for radius_owner in \
   hancore.shibumi.status/TrayDrawerPanel.qml \
   hancore.shibumi.update-center/UpdateCenterPanel.qml \
   hancore.shibumi.workspaces/WorkspacePanelContent.qml; do
-  rg -q 'radius: (panel|controller|root\.controller)\.controlRadius' \
-    "$radius_owner" \
+  # Approved beta.15.4 panel buttons follow their rendered panel radius.
+  case "$radius_owner" in
+    hancore.shibumi.ai/AiUsagePanel.qml|hancore.shibumi.cpu/CpuPanel.qml|\
+    hancore.shibumi.media/MediaPanel.qml|hancore.shibumi.memory/MemoryPanel.qml)
+      radius_pattern='radius: panel\.renderedSurfaceRadius' ;;
+    *) radius_pattern='radius: (panel|controller|root\.controller)\.controlRadius' ;;
+  esac
+  rg -q "$radius_pattern" "$radius_owner" \
     || fail "$radius_owner bypasses the dynamic Shibumi control radius"
 done
 
@@ -648,7 +687,7 @@ for ai_contract in \
   'width: root.providerGlyphWidth' \
   'height: root.providerGlyphHeight' \
   'readonly property int providerContentHorizontalOffset:' \
-  'providerId === "codex" && displayMode !== "text" ? -1 : 0' \
+  'providerId !== "claude" && providerId !== "opencode" && displayMode !== "text" ? -1 : 0' \
   'anchors.horizontalCenterOffset: root.providerContentHorizontalOffset' \
   'anchors.horizontalCenterOffset: root.providerGlyphHorizontalOffset' \
   '? Qt.size(20, 12) : Qt.size(56, 56)' \
@@ -714,7 +753,7 @@ rg -Fq 'readonly property int iconSlotSize: 14' \
 if rg -Fq 'text: "HDD "' hancore.shibumi.storage/BarWidget.qml; then
   fail "storage bar restored the obsolete HDD prefix"
 fi
-rg -Fq 'GpuCardIcon {' \
+rg -Fq 'Presentation.BarGlyph {' \
   hancore.shibumi.gpu/BarWidget.qml \
   || fail "GPU bar icon is not rendered by its native QML component"
 [[ -f hancore.shibumi.gpu/GpuCardIcon.qml ]] \

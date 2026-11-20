@@ -2,19 +2,70 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
+import Quickshell.Io as DictationIo
 import "status" as Status
 import "hancore.shibumi.bar/services" as BarServices
+import "hancore.shibumi.state/runtime" as SuiteRuntime
 import "fixtures" as Fixtures
 
 ShellRoot {
   id: root
 
+  property bool dictationChecked: false
+  Status.Service { id: dictationBackend; runtimeProbesEnabled: false }
+  DictationIo.Process {
+    id: dictationSetup; running: true
+    command: ["bash", "-c", "d=$XDG_RUNTIME_DIR/dictation-bin; mkdir \"$d\"; ln -s /usr/bin/bash \"$d/bash\"; ln -s /usr/bin/setpriv \"$d/setpriv\"; printf '%s\\n' \"$1\" >\"$d/voxtype\"; chmod 700 \"$d/voxtype\"", "fixture", "#!/bin/bash\n[[ \"$*\" == \"status --follow --extended --format json\" ]] || exit 2\nprintf '%s\\n' '{\"alt\":\"recording\",\"tooltip\":\"fixture\"}'\nexec /usr/bin/sleep 0.2"]
+    onExited: function(code) { if (code !== 0) return root.fail("dictation fixture setup"); const p = Array.from(dictationBackend.resources).find(p => "command" in p && p.command[0] === "bash"); p.environment = ({ PATH: Quickshell.env("XDG_RUNTIME_DIR") + "/dictation-bin" }); dictationBackend.runtimeProbesEnabled = true; p.running = true }
+  }
+  Timer { id: dictationCheck; interval: 40; repeat: true; running: true; property int phase: 0
+    onTriggered: {
+      const p = Array.from(dictationBackend.resources).find(p => "command" in p && p.command[0] === "bash")
+      if (dictationCheck.phase === 0 && dictationBackend.voxtypeActive) { if (dictationBackend.voxtypeHint !== "fixture") return root.fail("direct dictation status"); dictationCheck.phase = 1 }
+      else if (dictationCheck.phase === 1 && !p.running) { dictationCheck.phase = 2; dictationSetup.command = ["/usr/bin/rm", Quickshell.env("XDG_RUNTIME_DIR") + "/dictation-bin/voxtype"]; dictationSetup.running = true }
+      else if (dictationCheck.phase === 2 && !dictationBackend.voxtypeRetryEnabled) {
+        if (dictationBackend.voxtypeAvailable || Array.from(dictationBackend.resources).find(t => "interval" in t && t.interval === 60000).running) return root.fail("absent dictation backend retried")
+        root.dictationChecked = true; stop()
+      }
+    }
+  }
+  property int recordingPhase: 0
+  property double recordingChangedAt: 0
+  property bool recordingChecked: false
+  Status.Service { id: recordingBackend; runtimeProbesEnabled: false }
+  FileView { id: recordingMarker; path: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-screenrecord-filename"; preload: false; printErrors: false }
+  Process { id: recordingChild; command: ["bash", "-c", "exec -a wf-recorder sleep 30"] }
+  Timer {
+    interval: 40; repeat: true; running: true
+    onTriggered: {
+      const now = Date.now()
+      if (root.recordingPhase === 0) {
+        Array.from(recordingBackend.resources).filter(p => "command" in p && p.command[0] === "bash").forEach(p => p.command = ["true"])
+        recordingBackend.runtimeProbesEnabled = true; recordingChild.running = true; root.recordingPhase = 1; return
+      }
+      if (root.recordingPhase === 1) { recordingMarker.setText("fixture"); root.recordingChangedAt = now; root.recordingPhase = 2; return }
+      if ((root.recordingPhase === 2 || root.recordingPhase === 4) && now - root.recordingChangedAt > 1100) return root.fail("recording event deadline")
+      if (root.recordingPhase === 2 && recordingBackend.recording) { console.log("recording start ms", now - root.recordingChangedAt); root.recordingPhase = 3 }
+      if (root.recordingPhase === 3 && now - root.recordingChangedAt >= 2200) {
+        if (recordingBackend.recordingElapsed < 1) return root.fail("recording elapsed did not advance")
+        recordingChild.signal(15); root.recordingChangedAt = now; root.recordingPhase = 4
+      }
+      if (root.recordingPhase === 4 && !recordingBackend.recording) { console.log("recording stop ms", now - root.recordingChangedAt); root.recordingChecked = true; stop() }
+    }
+  }
   property int phase: 0
   property int phaseTicks: 0
   property real initialWidth: 0
   property var clickTargets: []
   property var statusSettings: ({ displayMode: "full" })
   readonly property var scopedStatus: scopedStatusLoader.item
+  readonly property var scopedDiagnosticStatus: scopedDiagnosticStatusLoader.item
+  property bool groupingPrepared: false
+  property bool scopedServiceStarted: false
+  property int scopedServicePhase: 0
+  property int scopedStayAwakeChanges: 0
+  property int scopedDndChanges: 0
 
   function fail(message) {
     console.error("status-widget-smoke:", message)
@@ -73,6 +124,10 @@ ShellRoot {
     id: fakeNotifications
     property bool doNotDisturb: false
     property var pendingModel: pendingNotifications
+    property var popupModel: pendingNotifications
+    property var focusedApps: []
+    function focusApp(entry) { focusedApps = focusedApps.concat([entry.app]) }
+    function invokePopupDefault(index) { dismissPendingCount += index + 1 }
     property var pastModel: pastNotifications
     property int dndToggleCount: 0
     property int markAllSeenCount: 0
@@ -90,6 +145,7 @@ ShellRoot {
   QtObject {
     id: fakeState
     property var writes: []
+    function paletteColor(id) { return id === "color01" ? "#e85d74" : "#4477cc" }
 
     function setWidgetSetting(groupId, moduleId, key, value) {
       writes = writes.concat([{
@@ -124,6 +180,107 @@ ShellRoot {
       commands = commands.concat([command.slice()])
       return true
     }
+  }
+
+  QtObject {
+    id: leasedIdleA
+    property bool stayAwake: true
+    property int setCalls: 0
+    function setIdleEnabled(value) {
+      stayAwake = value !== true
+      setCalls++
+    }
+  }
+
+  QtObject {
+    id: leasedNotificationsA
+    property bool doNotDisturb: true
+    property int setCalls: 0
+    function setDoNotDisturb(value) {
+      doNotDisturb = value === true
+      setCalls++
+    }
+  }
+
+  QtObject {
+    id: leasedIdleB
+    property bool stayAwake: false
+    property int setCalls: 0
+    function setIdleEnabled(value) {
+      stayAwake = value !== true
+      setCalls++
+    }
+  }
+
+  QtObject {
+    id: leasedNotificationsB
+    property bool doNotDisturb: false
+    property int setCalls: 0
+    function setDoNotDisturb(value) {
+      doNotDisturb = value === true
+      setCalls++
+    }
+  }
+
+  QtObject {
+    id: leasedBarHostA
+    readonly property string pluginId: "hancore.shibumi.bar"
+    function firstPartyServiceFor(id) {
+      if (id === "omarchy.idle") return leasedIdleA
+      if (id === "omarchy.notifications") return leasedNotificationsA
+      return null
+    }
+  }
+
+  QtObject {
+    id: leasedBarHostB
+    readonly property string pluginId: "hancore.shibumi.bar"
+    function firstPartyServiceFor(id) {
+      if (id === "omarchy.idle") return leasedIdleB
+      if (id === "omarchy.notifications") return leasedNotificationsB
+      return null
+    }
+  }
+
+  Item {
+    id: leasedBarOwner
+    property var providerHost: leasedBarHostA
+    SuiteRuntime.Provider {
+      id: leasedBarProvider
+      pluginId: "hancore.shibumi.bar"
+      implementationVersion: "0.2.5"
+      owner: leasedBarOwner
+      host: leasedBarOwner.providerHost
+      manifest: ({ id: "hancore.shibumi.bar",
+        version: "0.2.5", kinds: ["bar"] })
+    }
+  }
+
+  QtObject {
+    id: rawScopedStatusShell
+    readonly property string pluginId: "hancore.shibumi.status"
+    function serviceFor(_id) { return null }
+    function firstPartyServiceFor(_id) { return null }
+  }
+
+  Loader {
+    id: scopedDiagnosticStatusLoader
+    active: root.scopedServiceStarted
+    sourceComponent: Component {
+      Status.Service {
+        shell: rawScopedStatusShell
+        manifest: ({ id: "hancore.shibumi.status",
+          version: "0.2.5", kinds: ["service"] })
+        actionRunner: actionRecorder
+        runtimeProbesEnabled: false
+      }
+    }
+  }
+
+  Connections {
+    target: root.scopedDiagnosticStatus
+    function onStayAwakeChanged() { root.scopedStayAwakeChanges++ }
+    function onNotificationsSilencedChanged() { root.scopedDndChanges++ }
   }
 
   Status.Service {
@@ -303,8 +460,7 @@ ShellRoot {
         trayComponent: childComponent
         trayDrawerSource: Qt.resolvedUrl(
           "fixtures/TrayDrawerTestPanel.qml")
-        notificationPanelSource: Qt.resolvedUrl(
-          "fixtures/NotificationPanelTestView.qml")
+        notificationPanelSource: Qt.resolvedUrl("status/NotificationPanel.qml")
       }
     }
   }
@@ -324,11 +480,119 @@ ShellRoot {
     }
   }
 
+  function advanceScopedServiceRegression() {
+    if (scopedServicePhase === 0) {
+      if (!SuiteRuntime.Runtime.ready || !leasedBarProvider.registered) return false
+      if (!scopedServiceStarted) {
+        scopedServiceStarted = true
+        return false
+      }
+      if (!scopedDiagnosticStatus) return false
+      const notifications = scopedDiagnosticStatus.notificationService
+      if (scopedDiagnosticStatus.idleService !== leasedIdleA || !notifications)
+        return fail("scoped Status did not resolve owner A")
+      if (notifications.historyState === "loading") return false
+      if (notifications === leasedNotificationsA
+          || !scopedDiagnosticStatus.stayAwake
+          || !scopedDiagnosticStatus.notificationsSilenced
+          || !notifications.historyAvailable
+          || !notifications.pastDismissAvailable
+          || !notifications.pastClearAvailable
+          || notifications.pendingCount !== 0
+          || notifications.recentCount !== 0
+          || notifications.pendingModel.count !== 0
+          || notifications.pastModel.count !== 0)
+        return fail("owner A narrow notification capabilities were widened")
+      const idleChanges = scopedStayAwakeChanges
+      const dndChanges = scopedDndChanges
+      if (!scopedDiagnosticStatus.toggleStayAwake()
+          || leasedIdleA.setCalls !== 1
+          || scopedDiagnosticStatus.stayAwake
+          || scopedStayAwakeChanges <= idleChanges
+          || !scopedDiagnosticStatus.toggleNotifications()
+          || leasedNotificationsA.setCalls !== 1
+          || scopedDiagnosticStatus.notificationsSilenced
+          || scopedDndChanges <= dndChanges)
+        return fail("owner A mutation notifications did not reach Status")
+      console.log("status scoped capabilities: lease=A available=true"
+        + " idle=" + scopedDiagnosticStatus.stayAwake
+        + " dnd=" + scopedDiagnosticStatus.notificationsSilenced
+        + " history=true pastDismiss=true pending=0 recent=0")
+      leasedBarOwner.providerHost = null
+      scopedServicePhase++
+      return false
+    }
+    if (scopedServicePhase === 1) {
+      if (leasedBarProvider.registered) return false
+      if (scopedDiagnosticStatus.idleService !== null
+          || scopedDiagnosticStatus.notificationService !== null
+          || scopedDiagnosticStatus.stayAwake
+          || scopedDiagnosticStatus.notificationsSilenced)
+        return fail("scoped Status retained a withdrawn owner A lease")
+      if (scopedDiagnosticStatus.toggleStayAwake()
+          || scopedDiagnosticStatus.toggleNotifications()
+          || leasedIdleA.setCalls !== 1
+          || leasedNotificationsA.setCalls !== 1)
+        return fail("withdrawn owner A remained mutable through Status")
+      console.log("status scoped capabilities: lease=none available=false"
+        + " idle=" + scopedDiagnosticStatus.stayAwake
+        + " dnd=" + scopedDiagnosticStatus.notificationsSilenced
+        + " history=false pending=0 recent=0")
+      leasedBarOwner.providerHost = leasedBarHostB
+      scopedServicePhase++
+      return false
+    }
+    if (scopedServicePhase === 2) {
+      if (!leasedBarProvider.registered) return false
+      const notifications = scopedDiagnosticStatus.notificationService
+      if (scopedDiagnosticStatus.idleService !== leasedIdleB || !notifications)
+        return fail("scoped Status did not resolve owner B")
+      if (notifications.historyState === "loading") return false
+      if (scopedDiagnosticStatus.stayAwake
+          || scopedDiagnosticStatus.notificationsSilenced
+          || !notifications.historyAvailable
+          || !notifications.pastDismissAvailable
+          || !notifications.pastClearAvailable
+          || notifications.pendingCount !== 0
+          || notifications.recentCount !== 0
+          || notifications.pendingModel.count !== 0
+          || notifications.pastModel.count !== 0)
+        return fail("owner B narrow notification state was incorrect")
+      leasedIdleA.stayAwake = true
+      leasedNotificationsA.doNotDisturb = true
+      if (scopedDiagnosticStatus.stayAwake
+          || scopedDiagnosticStatus.notificationsSilenced)
+        return fail("withdrawn owner A still affected Status")
+      const idleChanges = scopedStayAwakeChanges
+      const dndChanges = scopedDndChanges
+      if (!scopedDiagnosticStatus.toggleStayAwake()
+          || leasedIdleB.setCalls !== 1
+          || !scopedDiagnosticStatus.stayAwake
+          || scopedStayAwakeChanges <= idleChanges
+          || !scopedDiagnosticStatus.toggleNotifications()
+          || leasedNotificationsB.setCalls !== 1
+          || !scopedDiagnosticStatus.notificationsSilenced
+          || scopedDndChanges <= dndChanges
+          || leasedIdleA.setCalls !== 1
+          || leasedNotificationsA.setCalls !== 1)
+        return fail("owner B mutation notifications did not reach Status")
+      console.log("status scoped capabilities: lease=B available=true"
+        + " idle=" + scopedDiagnosticStatus.stayAwake
+        + " dnd=" + scopedDiagnosticStatus.notificationsSilenced
+        + " history=true pastDismiss=true pending=0 recent=0"
+        + " oldOwnerIsolated=true")
+      console.log("status scoped service lease regression passed")
+      scopedServicePhase++
+    }
+    return true
+  }
+
   Timer {
     interval: 80
     repeat: true
     running: true
     onTriggered: {
+      if (!root.advanceScopedServiceRegression()) return
       root.phaseTicks++
       const status = statusLoader.item
       if (root.phase === 0) {
@@ -374,6 +638,12 @@ ShellRoot {
             || status.updateWidget.settings.marker !== "hancore.shibumi.update-center"
             || status.trayWidget.settings.marker !== "omarchy.tray")
           return root.fail("child identity/settings injection")
+        const keptUpdate = status.updateWidget, keptTray = status.trayWidget
+        status.bar = null
+        const retained = !!status.updateWidget && !!status.trayWidget
+          && status.updateWidget === keptUpdate && status.trayWidget === keptTray
+        status.bar = fakeBar
+        if (!retained) return root.fail("bar handoff unloaded embedded children before sync")
         if (String(status.updateWidget.contentColor).toLowerCase()
             !== "#88bbee")
           return root.fail("initial embedded updater color")
@@ -400,8 +670,6 @@ ShellRoot {
             || status.updateSlotLayer !== 3
             || status.traySlotLayer !== 2
             || status.notificationSlotLayer !== 1
-            || status.updateBadgeLayer !== 10
-            || status.trayBadgeLayer !== 10
             || status.notificationBadgeLayer !== 10
             || status.implicitWidth !== 112)
           return root.fail("V2 status geometry is not symmetric: inset="
@@ -508,21 +776,45 @@ ShellRoot {
       } else if (root.phase === 3) {
         if (!status.notificationPanelLoaded || root.phaseTicks < 3) return
         const notificationPanel = status.notificationPanelItem
+        if (!fakeNotifications.focusedApps.length) {
+          ["", "  ", "bad\napp", null, {}].forEach(app => notificationPanel.openNotification("past", app))
+          if (fakeNotifications.focusedApps.length) return root.fail("invalid Recent app dispatched")
+          notificationPanel.openNotification("past", notificationPanel.notificationService.pastModel.get(0).app)
+          if (fakeNotifications.focusedApps.join() !== "Fixture" || status.notificationPanelOpen || fakeNotifications.dismissPendingCount !== 0) return root.fail("Recent focus/close invoked a Live action")
+          status.open(); root.phaseTicks = 0; return
+        }
         if (notificationPanel.ownerWidget !== status
             || notificationPanel.notificationService
               !== status.notificationService
             || notificationPanel.anchorItem === null
             || notificationPanel.bar !== fakeBar
             || notificationPanel.pendingCount !== 3
+            || !notificationPanel.notificationService.pastDismissAvailable
+            || !notificationPanel.notificationService.pastClearAvailable
             || fakeBar.activePopout !== status)
           return root.fail("notification panel injection/popout ownership")
-        notificationPanel.toggleDnd()
-        notificationPanel.markAllSeen()
-        notificationPanel.dismissPending()
+        if (!root.groupingPrepared) {
+          pendingNotifications.set(0, { appIcon: Qt.resolvedUrl("fixtures/app.svg").toString(),
+            body: "<b>Hello</b> &amp; bye<br/>next<img src='https://invalid.test/pixel'>", urgency: 2,
+            timestamp: new Date(2026, 8, 26, 10, 30).getTime() })
+          root.groupingPrepared = true; root.phaseTicks = 0; return
+        }
+        const checks = {
+          body: notificationPanel.sanitizedBody(pendingNotifications.get(0).body, "Fixture", "") === "Hello & bye\nnext",
+          icons: typeof notificationPanel.safeIconSource === "function" && notificationPanel.safeIconSource(pendingNotifications.get(0).appIcon) !== ""
+            && ["https://invalid.test/pixel", "data:image/png;base64,AA", "file://remote/icon", "/no-such-shibumi-icon"].every(v => notificationPanel.safeIconSource(v) === ""),
+        }
+        console.log("234_NOTIFICATION_GROUPING", JSON.stringify(checks))
+        if (Object.values(checks).some(ok => !ok)) return root.fail("grouping/body/icon/metadata presentation")
+        notificationPanel.setDnd(false)
+        notificationPanel.clearActive()
+        notificationPanel.dismiss("pending", 0)
         if (fakeNotifications.dndToggleCount !== 2
             || fakeNotifications.markAllSeenCount !== 1
             || fakeNotifications.dismissPendingCount !== 1)
           return root.fail("notification actions bypassed official service")
+        pendingNotifications.setProperty(0, "originalId", 7); notificationPanel.openNotification("pending", String(notificationPanel.activeRows[0].liveToken || ""))
+        if (fakeNotifications.dismissPendingCount !== 2) return root.fail("panel did not use exact Live dispatch")
         status.trayWidget.managePopupOpen = true
         status.close()
         root.phase++
@@ -574,7 +866,7 @@ ShellRoot {
       } else if (root.phase === 8) {
         if (root.phaseTicks < 3) return
         if (status.v2Mode || !status.v1CustomToneActive
-            || !status.updateWidget.customToneActive
+            || !Qt.colorEqual(status.updateWidget.contentColor, fakeBar.background)
             || Math.abs(status.trayDrawerIconColor.r
               - fakeBar.background.r) > 0.001
             || Math.abs(status.trayDrawerIconColor.g
@@ -583,22 +875,14 @@ ShellRoot {
               - fakeBar.background.b) > 0.001
             || Math.abs(status.trayDrawerIconColor.a - 0.7) > 0.003
             || !Qt.colorEqual(
-              status.trayDrawerBadgeColor, fakeBar.background)
-            || !Qt.colorEqual(
-              status.trayDrawerBadgeTextColor, "#cc8844")
-            || !Qt.colorEqual(
-              status.notificationBadgeColor, fakeBar.background)
+              status.notificationBadgeColor, "#e85d74")
             || !Qt.colorEqual(
               status.notificationBadgeTextColor, "#cc8844")
-            || !Qt.colorEqual(status.badgeContrastColor, "#cc8844")
-            || !Qt.colorEqual(
-              status.updateWidget.badgeContrastColor, "#cc8844"))
+            || !Qt.colorEqual(status.badgeContrastColor, "#cc8844"))
           return root.fail("V1 tray drawer content tone"
             + " v2=" + status.v2Mode
             + " custom=" + status.v1CustomToneActive
             + " icon=" + status.trayDrawerIconColor
-            + " badge=" + status.trayDrawerBadgeColor
-            + " text=" + status.trayDrawerBadgeTextColor
             + " background=" + fakeBar.background)
         statusLoader.active = false
         root.phase++
@@ -607,6 +891,8 @@ ShellRoot {
         if (root.phaseTicks < 3) return
         if (root.clickTargets.length !== 0 || fakeBar.activePopout !== null)
           return root.fail("destruction cleanup")
+        if (!root.recordingChecked) return
+        if (!root.dictationChecked) return
         stop()
         console.log("status plugin smoke passed")
         Qt.quit()

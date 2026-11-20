@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
+export QT_FORCE_STDERR_LOGGING=1
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/tests/lib/baselines.sh"
@@ -17,6 +18,31 @@ command -v rg >/dev/null 2>&1 || fail "rg is required"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [[ -x /usr/bin/quickshell ]] || fail "quickshell is required for the complete contract"
 
+# Host command compatibility includes bin/, not only QML capabilities.
+python3 - "$repo_root" "$OMARCHY_PATH" <<'PY'
+import os, re, sys
+from pathlib import Path
+root = Path(sys.argv[1])
+hosts = {Path(sys.argv[2])} | {Path(v) for k, v in os.environ.items() if k in (
+    'SHIBUMI_INSTALLED_SOURCE_OMARCHY_PATH', 'SHIBUMI_AGENTS_OMARCHY_PATH',
+    'SHIBUMI_FORWARD_COMPAT_OMARCHY_PATH', 'SHIBUMI_NATIVE_CATALOG_OMARCHY_PATH') and v}
+# Namespace, marker, package name, and a validated dynamic collector prefix.
+noncommands = {'omarchy-keyboard-panel', 'omarchy-screenrecord-filename', 'omarchy-dev', 'omarchy-agent-usage-'}
+for host in sorted(hosts):
+    assert (host / 'bin').is_dir(), f'missing host bin/: {host}'
+    for path in sorted(root.glob('hancore.*/**/*')):
+        if not path.is_file() or path.suffix not in ('', '.qml', '.js', '.py', '.sh'): continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            if line.lstrip().startswith(('#', '//')): continue
+            branch = re.search(r'if command -v ([\w-]+) [^;]+; then ([^;]+); else ([^;]+); fi', line)
+            if branch:
+                line = line.replace(branch[0], branch[2 if os.access(host / 'bin' / branch[1], os.X_OK) else 3])
+            for name in set(re.findall(r'\bomarchy-[\w-]+', line)) - noncommands:
+                if re.search(r'(?:if|elif) command -v ' + re.escape(name) + r'\s', line): continue
+                if not os.access(host / 'bin' / name, os.X_OK):
+                    raise SystemExit(f'{path.relative_to(root)}:{number}: {name} missing in {host}/bin without a presence test')
+print('plugin host-command contract passed:', ', '.join(map(str, sorted(hosts))))
+PY
 "$repo_root/tests/baseline-contract-regression.sh"
 "$repo_root/tests/documentation-regression.py"
 python3 "$repo_root/tests/production-boundary-regression.py"
@@ -154,16 +180,44 @@ if ! {
 fi
 rg -q '^PanelWindow \{' hancore.shibumi.bar/core/BarPanel.qml \
   || fail "output surface must be a PanelWindow"
-rg -Fq 'implicitHeight: !bar.vertical && validScreen ? screen.height : 0' \
+rg -Fxq '  implicitHeight: !bar.vertical && validScreen ? bar.barSize + shadowPadding : 0' \
   hancore.shibumi.bar/core/BarPanel.qml \
-  || fail "horizontal host must stay screen-sized to avoid edit resize flashes"
+  && rg -Uq '^  readonly property int shadowPadding: !bar\.vertical && bar\.position === "top"\n    && bar\.visualTokens\n      \? bar\.visualTokens\.shellStyle === "shibumi"\n        \? bar\.visualTokens\.shadowEnabled === true \? 9 : 0\n        : \["full", "fit"\]\.indexOf\(bar\.visualTokens\.shellStyle\) >= 0 \? 11\n          : bar\.visualTokens\.shellStyle === "notch" \? 1 : 0\n      : 0$' hancore.shibumi.bar/core/BarPanel.qml \
+  || fail "horizontal host must remain bar-height during edit"
+rg -Fq 'implicitWidth: bar.vertical && validScreen ? bar.barSize : 0' \
+  hancore.shibumi.bar/core/BarPanel.qml \
+  || fail "vertical host must remain bar-width during edit"
 rg -Fq 'WlrLayershell.keyboardFocus: dragSession.editing' \
   hancore.shibumi.bar/core/BarPanel.qml \
   || fail "stable bar surface must own temporary edit focus"
-rg -q '^  mask: Region \{' hancore.shibumi.bar/core/BarPanel.qml \
-  || fail "screen-sized bar surface must constrain its locked input region"
-rg -Fq 'onClicked: dragSession.setEditing(false)' hancore.shibumi.bar/core/BarPanel.qml \
-  || fail "stable edit surface does not dismiss from outside clicks"
+if [[ $(rg '^[[:space:]]*mask:' hancore.shibumi.bar/core/BarPanel.qml) != '  mask: Region { item: barSurfaceLoader }' ]] || rg -Uq '^  (width|height):|\bMouseArea[[:space:]]*\{' hancore.shibumi.bar/core/BarPanel.qml; then
+  fail "bar-local window retained a fullscreen mask or outside-click area"
+fi
+for backdrop_contract in \
+  'id: editBackdropLoader' \
+  'active: dragSession.editing' \
+  '&& barWindow.visible && barWindow.backingWindowVisible' \
+  '&& windowRecovery.recoveryVisible' \
+  'EditBackdropPanel {' \
+  'barVisible: barWindow.visible && barWindow.backingWindowVisible'; do
+  rg -Fq "$backdrop_contract" hancore.shibumi.bar/core/BarPanel.qml \
+    || fail "edit backdrop lifecycle drifted: $backdrop_contract"
+done
+[[ $(rg -c 'EditBackdropPanel \{' hancore.shibumi.bar/core/BarPanel.qml) -eq 1 ]] \
+  || fail "each bar output must declare exactly one edit-only backdrop component"
+for backdrop_surface_contract in \
+  'visible: layoutSession.editing && barVisible' \
+  'readonly property real outsideY: bar.position === "top" ? bar.barSize : 0' \
+  '? Math.max(0, height - bar.barSize) : height' \
+  'WlrLayershell.layer: WlrLayer.Top' \
+  'WlrLayershell.keyboardFocus: WlrKeyboardFocus.None' \
+  'mask: Region { item: dismissArea }' \
+  'y: root.outsideY' \
+  'height: root.outsideHeight' \
+  'onClicked: root.layoutSession.setEditing(false)'; do
+  rg -Fq "$backdrop_surface_contract" hancore.shibumi.bar/core/EditBackdropPanel.qml \
+    || fail "edit backdrop surface drifted: $backdrop_surface_contract"
+done
 rg -q '^PanelWindow \{' hancore.shibumi.bar/core/DragGhostPanel.qml \
   || fail "drag ghost must be isolated from the edge-local bar window"
 rg -q 'mask: Region \{\}' hancore.shibumi.bar/core/DragGhostPanel.qml \
@@ -173,11 +227,13 @@ rg -Fq 'DragGhostVisual {' hancore.shibumi.bar/core/DragGhostPanel.qml \
 if rg -q 'barOrigin[XY]' hancore.shibumi.bar/core/DragGhostPanel.qml hancore.shibumi.bar/core/DragGhostVisual.qml; then
   fail "drag ghost must not add an edge offset to full-window coordinates"
 fi
-rg -Fq 'y: !barWindow.bar.vertical && barWindow.bar.position === "bottom"' \
-  hancore.shibumi.bar/core/BarPanel.qml \
-  || fail "bottom bar surface must use stable explicit placement"
-if rg -q 'anchors\.(top|bottom):.*barWindow\.bar\.position' hancore.shibumi.bar/core/BarPanel.qml; then
-  fail "bar surface must not switch conditional vertical anchors at runtime"
+awk '/^[[:space:]]*id: barSurfaceLoader$/,/^  }$/' hancore.shibumi.bar/core/BarPanel.qml \
+  | awk '/^    width: parent[.]width$/ { width++ } /^    height: barWindow[.]bar[.]vertical [?] parent[.]height : barWindow[.]bar[.]barSize$/ { height++ }
+      /^[[:space:]]*((x|y|scale|rotation|transform)[[:space:]]*:|anchors[.:[:space:]{])/ { shifted=1 } END { exit !(width == 1 && height == 1 && !shifted) }' \
+  || fail "bar surface must fill the edge-local bar window from local origin zero"
+if rg -q 'barSurfaceLoader[[:space:]]*\.|id: barSurfaceLoader' hancore.shibumi.bar/core/BarPanel.qml \
+    && rg -q '^[[:space:]]+(x|y): .*barWindow\.bar\.position' hancore.shibumi.bar/core/BarPanel.qml; then
+  fail "bar surface retained a fullscreen-window edge offset"
 fi
 rg -q '^Scope \{' hancore.shibumi.bar/core/WindowRecovery.qml \
   || fail "per-output window recovery scope is missing"
@@ -216,14 +272,16 @@ if rg -q 'Services\.(SystemTelemetry|GpuTelemetry|PowerService|StatusService|Wea
 fi
 rg -q 'Qt\.createComponent\(url, Component\.PreferSynchronous\)' hancore.shibumi.bar/services/HostWidgetResolver.qml \
   || fail "host widget resolver does not load official manifest entry points"
-[[ $(rg -l 'bar\.registeredWidgetComponent' \
+[[ $(rg -l 'embed\.resolveComponent\(' \
   hancore.shibumi.{audio,status,center}/BarWidget.qml | wc -l) -eq 3 ]] \
   || fail "host-backed composites bypass the stable widget resolver"
+rg -Fq 'bar.registeredWidgetComponent(id)' shared/runtime/HostWidgetEmbed.qml \
+  || fail "shared embed helper bypasses the stable widget resolver"
 if rg -q 'registered(Component|Source)|registeredWidget(Component|Source)' \
     hancore.shibumi.network/Service.qml; then
   fail "native Network owner still resolves a host feature component"
 fi
-rg -q 'registeredComponent\("omarchy\.monitor"\)' hancore.shibumi.brightness/Service.qml \
+rg -Fq 'embed.resolveComponent("", "omarchy.monitor")' hancore.shibumi.brightness/Service.qml \
   || fail "shipped monitor owner bypasses the stable widget resolver"
 if rg -q 'registeredWidgetComponent\("omarchy\.bluetooth"\)' \
     hancore.shibumi.bluetooth/Service.qml; then
@@ -258,10 +316,12 @@ rg -Fq 'function submitLoaderSource(candidate)' \
   hancore.shibumi.bar/core/WidgetSlot.qml \
   && rg -Fq 'const nextSource = slotComplete && moduleEnabled ? candidate : null' \
     hancore.shibumi.bar/core/WidgetSlot.qml \
-  && rg -Fq 'submitLoaderSource(resolvedComponent)' \
+  && rg -Fq '!("claimLoadedOwner" in bar) || bar.widgetSlotLoadAdmitted(root)' \
     hancore.shibumi.bar/core/WidgetSlot.qml \
-  || fail "widget slots must submit the resolved component through the controlled setter"
-rg -q 'active: root\.slotComplete && root\.moduleEnabled' \
+  && rg -Fq '? resolvedComponent : null)' \
+    hancore.shibumi.bar/core/WidgetSlot.qml \
+  || fail "widget slots must gate controlled source submission with a legacy fallback"
+rg -q 'active: root\._loaderSubmissionActive' \
   hancore.shibumi.bar/core/WidgetSlot.qml \
   && rg -q 'root\._submission\.source !== null' \
     hancore.shibumi.bar/core/WidgetSlot.qml \
@@ -276,18 +336,39 @@ for compatibility_contract in \
     'findCompatibilityCard' \
     'hostedModule' \
     'hostPanelChromeEnabled' \
-    'hostPanelPlacementEnabled' \
-    'hostPanelHeightRepairEnabled' \
-    'compatibilityAvailableContentHeight' \
-    'findCompatibilityContentHolder' \
-    'measureCompatibilityContent' \
     'compatibilitySurfaceTimer' \
-    'compatibilityMeasureTimer' \
-    'compatibilityOpenMeasureTimer' \
-    'hostedCardOrigin' \
     'publishCompatibilityConnection'; do
   rg -Fq "$compatibility_contract" hancore.shibumi.bar/core/WidgetSlot.qml \
     || fail "third-party host compatibility lost $compatibility_contract"
+done
+for retired_compatibility_contract in \
+    'compatibilityContentHolder' \
+    'compatibilityNativeContentHeight' \
+    'compatibilityMeasuredContentHeight' \
+    'compatibilityContentResolutionAttempts' \
+    'compatibilityMeasurementRunning' \
+    'hostPanelPlacementEnabled' \
+    'hostPanelHeightRepairEnabled' \
+    'compatibilityDesiredContentHeight' \
+    'compatibilityAvailableContentHeight' \
+    'compatibilityHostedContentHeight' \
+    'compatibilityDescendantCount' \
+    'findCompatibilityContentHolder' \
+    'measureCompatibilityContent' \
+    'refreshCompatibilityContent' \
+    'compatibilityMeasureTimer' \
+    'compatibilityOpenMeasureTimer' \
+    'hostedCardOrigin'; do
+  if rg -Fq "$retired_compatibility_contract" \
+      hancore.shibumi.bar/core/WidgetSlot.qml; then
+    fail "third-party host compatibility retained measurement repair: $retired_compatibility_contract"
+  fi
+done
+for foreign_geometry_property in contentHeight x y; do
+  if rg -Fq "property: \"$foreign_geometry_property\"" \
+      hancore.shibumi.bar/core/WidgetSlot.qml; then
+    fail "hosted panel adapter overrides provider-owned $foreign_geometry_property"
+  fi
 done
 rg -q 'readonly property bool hostedModule: !suiteNativeModule' \
   hancore.shibumi.bar/core/WidgetSlot.qml \
@@ -295,22 +376,22 @@ rg -q 'readonly property bool hostedModule: !suiteNativeModule' \
 rg -Fq 'if (root.bar.pendingTooltipTarget || root.bar.tooltipTarget) return' \
   hancore.shibumi.bar/core/WidgetSlot.qml \
   || fail "manifest tooltip fallback can override a plugin tooltip"
-rg -Fq 'Binding.RestoreBindingOrValue' hancore.shibumi.bar/core/WidgetSlot.qml \
-  || fail "third-party panel chrome cannot restore native bindings"
-[[ $(rg -c 'value: root\.hostedCardOrigin\(root\.compatibilityPanel\)' \
-  hancore.shibumi.bar/core/WidgetSlot.qml) -eq 2 ]] \
-  || fail "hosted panels do not translate both card axes to the visible bar"
-rg -Fq 'y = barThickness + gap' hancore.shibumi.bar/core/WidgetSlot.qml \
-  || fail "top hosted panels still derive their offset from the host window"
-rg -Fq 'property: "contentHeight"' hancore.shibumi.bar/core/WidgetSlot.qml \
-  || fail "screen-sized hosted panels do not repair KeyboardPanel height"
-rg -Fq 'screenHeight - barThickness - gap - margin' hancore.shibumi.bar/core/WidgetSlot.qml \
-  || fail "hosted panel height is not capped at the visible bar edge"
-rg -Fq 'Math.min(compatibilityNativeContentHeight, currentNativeHeight)' \
+[[ $(rg -c 'Binding.RestoreBindingOrValue' \
+  hancore.shibumi.bar/core/WidgetSlot.qml) -eq 3 ]] \
+  || fail "third-party panel chrome must restore native border, color, and radius bindings"
+rg -Fq 'compatibilitySurfaceResolutionAttempts < 20' \
   hancore.shibumi.bar/core/WidgetSlot.qml \
-  || fail "opening a hosted panel can recapture its repaired height as native"
-rg -Fq 'item.mapToItem(holder, 0, 0)' hancore.shibumi.bar/core/WidgetSlot.qml \
-  || fail "hosted panel height does not follow rendered child geometry"
+  && rg -Uq 'id: compatibilitySurfaceTimer\n\n[[:space:]]*interval: 40' \
+    hancore.shibumi.bar/core/WidgetSlot.qml \
+  || fail "late hosted-panel discovery is not bounded at the dedicated 40 ms timer"
+for native_card_geometry in \
+    'cardX: Number(card.x) || 0' \
+    'cardY: Number(card.y) || 0' \
+    'cardWidth: Number(card.width) || 0' \
+    'cardHeight: Number(card.height) || 0'; do
+  rg -Fq "$native_card_geometry" hancore.shibumi.bar/core/WidgetSlot.qml \
+    || fail "hosted V2 connector does not read native geometry: $native_card_geometry"
+done
 rg -q '^PanelWindow \{' hancore.shibumi.bar/core/HostedPanelConnector.qml \
   || fail "hosted V2 caret overlay is missing"
 rg -q 'mask: Region \{\}' hancore.shibumi.bar/core/HostedPanelConnector.qml \
@@ -523,7 +604,7 @@ rg -q 'onTabRequested' hancore.shibumi.center/CalendarPanel.qml \
   || fail "G8 calendar is missing sibling-panel keyboard routing"
 rg -q 'Presentation\.ShibumiPillToolTip \{' hancore.shibumi.center/CalendarPanel.qml \
   || fail "G8 calendar navigation bypasses the Shibumi tooltip"
-if rg -q 'registeredSource\("omarchy\.indicators"\)' hancore.shibumi.center/BarWidget.qml; then
+if rg -q 'embed\.resolveSource\("omarchy\.indicators"\)' hancore.shibumi.center/BarWidget.qml; then
   fail "G8 must not instantiate Quattro's stock indicator presentation"
 fi
 rg -q '"service": "Service.qml"' hancore.shibumi.status/manifest.json \
@@ -621,15 +702,29 @@ rg -q 'hancore\.shibumi\.media' contracts/plugin-suite-v1.json \
   || fail "Shibumi media presentation is not registered"
 rg -q 'firstPartyServiceFor\("omarchy\.media"\)' hancore.shibumi.media/BarWidget.qml \
   || fail "media presentation does not reuse the official service"
+# Approved panel-only exception: native shuffle, repeat and seek (ARCHITECTURE.md, G9).
 if rg -q 'Quickshell\.Services\.(Mpris|Pipewire)|Mpris\.|Pipewire\.' \
-  hancore.shibumi.media/BarWidget.qml hancore.shibumi.media/MediaPanel.qml hancore.shibumi.media/MediaPulse.qml \
+  hancore.shibumi.media/BarWidget.qml hancore.shibumi.media/MediaPulse.qml \
   hancore.shibumi.media/MediaSpectrum.qml hancore.shibumi.media/MediaMuse.qml \
-  hancore.shibumi.media/Service.qml; then
+  hancore.shibumi.media/Service.qml \
+  || rg -q 'Quickshell\.Services\.Pipewire|Mpris\.|Pipewire\.' \
+    hancore.shibumi.media/MediaPanel.qml \
+  || ! awk '/Quickshell[.]Services[.]Mpris/ {
+    if ($0 != "import Quickshell.Services.Mpris" || ++imports > 1) exit 1
+  }' hancore.shibumi.media/MediaPanel.qml; then
   fail "Shibumi media presentation must not create a second media owner"
 fi
-if rg -q 'Process \{|Timer \{|FileView \{' hancore.shibumi.media/BarWidget.qml \
-  hancore.shibumi.media/MediaPulse.qml hancore.shibumi.media/MediaSpectrum.qml hancore.shibumi.media/MediaMuse.qml; then
-  fail "closed media bar presentation must remain worker-free"
+# Approved media exception: one visible/panel-revoked 25 Hz clock for playing
+# or the <=480 ms pause tail. Primitives cannot own clocks or backend workers.
+if rg -q 'Process \{|FileView \{|Animation.*\{|Qt\.callLater' hancore.shibumi.media/BarWidget.qml \
+  || rg -q 'Process \{|Timer \{|FileView \{|Animation.*\{|Qt\.callLater' \
+    hancore.shibumi.media/MediaPulse.qml hancore.shibumi.media/MediaSpectrum.qml hancore.shibumi.media/MediaMuse.qml \
+  || [[ $(rg -c 'Timer \{' hancore.shibumi.media/BarWidget.qml) -ne 1 ]] \
+  || ! rg -q 'interval: 40' hancore.shibumi.media/BarWidget.qml \
+  || ! rg -q 'running: root.motionRunning' hancore.shibumi.media/BarWidget.qml \
+  || ! rg -Fq 'readonly property bool motionRunning: visible && !opened && (playing || pulseSettling) && !iconMode' hancore.shibumi.media/BarWidget.qml \
+  || ! rg -Fq 'restElapsed = Math.min(480, restElapsed + milliseconds)' hancore.shibumi.media/MediaPulse.qml; then
+  fail "media surface must own exactly one bounded cadence and no backend workers"
 fi
 rg -q 'serviceFor\("hancore\.shibumi\.media"\)' hancore.shibumi.media/BarWidget.qml \
   || fail "media presentation does not resolve the process-wide spectrum service"
@@ -731,8 +826,6 @@ if rg -q 'InlineSpeedTestRunner|omarchy-network-|\bnmcli\b' \
     hancore.shibumi.network; then
   fail "native Network cutover retained a legacy backend helper"
 fi
-rg -q 'childPanelWidget\("omarchy\.network"\)' tests/network-plugin-smoke.qml \
-  || fail "network alias routing is not regression-tested"
 rg -q 'G13: \["hancore.shibumi.brightness"\]' hancore.shibumi.bar/core/GroupRegistry.js \
   || fail "G13 is not owned by the Shibumi brightness presentation"
 rg -q 'hancore\.shibumi\.brightness' contracts/plugin-suite-v1.json \
@@ -771,8 +864,6 @@ rg -Uq 'function shutdown\(\) \{\n([^\n]*\n){0,4}[[:space:]]*panelSync\.stop\(\)
 if rg -q '^[[:space:]]*selected:' hancore.shibumi.brightness/BrightnessPanel.qml; then
   fail "brightness panel uses Button-only selected state on CursorSurface"
 fi
-rg -q 'childPanelWidget\("omarchy\.monitor"\)' tests/brightness-plugin-smoke.qml \
-  || fail "monitor alias routing is not regression-tested"
 rg -q 'G12: \["hancore.shibumi.battery"\]' hancore.shibumi.bar/core/GroupRegistry.js \
   || fail "G12 is not owned by the Shibumi battery presentation"
 rg -q 'G14: \["hancore.shibumi.power-profile"\]' hancore.shibumi.bar/core/GroupRegistry.js \
@@ -791,7 +882,7 @@ rg -Fq 'commandFor("profiles", ["omarchy-powerprofiles-list", "--active-state"])
 rg -Fq 'commandFor("activeProfile", ["busctl", "--system", "get-property",' \
   hancore.shibumi.power-state/Service.qml \
   || fail "power owner does not use the lightweight active-profile probe"
-rg -Fq 'onTriggered: root.refreshActiveProfile()' \
+rg -Fq 'function onProfileChanged() { root.refreshActiveProfile() }' \
   hancore.shibumi.power-state/Service.qml \
   || fail "power hot path still refreshes the complete profile list"
 rg -Fq 'interval: 5 * 60 * 1000' hancore.shibumi.power-state/Service.qml \
@@ -803,7 +894,8 @@ rg -q 'omarchy-battery-status --shell' \
   || fail "power owner must retain exactly four operation slots"
 [[ $(rg -c 'Process \{' hancore.shibumi.power-state/PowerCommand.qml) -eq 1 ]] \
   || fail "each power operation slot must own exactly one process"
-if rg -q 'Quickshell\.Services\.UPower|Quickshell\.Io|Process \{|Timer \{|FileView \{' \
+# Visibility-gated pulse timers are presentation; power-plugins-regression checks their scope.
+if rg -q 'Quickshell\.Services\.UPower|Quickshell\.Io|Process \{|FileView \{' \
   hancore.shibumi.battery/BarWidget.qml hancore.shibumi.battery/BatteryPanel.qml \
   hancore.shibumi.power-profile/BarWidget.qml hancore.shibumi.power-profile/PowerProfilePanel.qml; then
   fail "power views must not duplicate UPower, worker, or polling ownership"
@@ -845,7 +937,7 @@ rg -q 'serviceFor\("hancore\.shibumi\.bluetooth"\)' "$bluetooth_widget" \
   || fail "Bluetooth view does not resolve the shipped service"
 rg -q 'property var sessionOwners: \[\]' "$bluetooth_service" \
   || fail "Bluetooth service lacks multi-output session accounting"
-rg -q 'target: "omarchy\.bluetooth"' "$bluetooth_service" \
+rg -q 'target: SuiteRuntime\.HostContract\.ipcTargets\.bluetooth\b' "$bluetooth_service" \
   || fail "Bluetooth service does not own the single legacy IPC target"
 rg -q 'bar\.hideBarWidget\("omarchy\.bluetooth"\)' "$bluetooth_service" \
   || fail "Bluetooth legacy close/hide is not routed to the local panel"
@@ -892,14 +984,14 @@ for bluetooth_adapter in "$bluetooth_adapter"; do
   rg -U -q 'function validatePendingAudioOutput\(\)[^}]*resolveNativeDevice\([^}]*!device\.connected[^}]*!deviceUsesCurrentAdapter' \
     "$bluetooth_adapter" \
     || fail "$bluetooth_adapter does not revalidate audio handoff identity/state"
-  [[ $(rg -c '^  Timer \{' "$bluetooth_adapter") -eq 4 ]] \
-    || fail "$bluetooth_adapter must have exactly four bounded lifecycle timers"
+  [[ $(rg -c '^  Timer \{' "$bluetooth_adapter") -eq 5 ]] \
+    || fail "$bluetooth_adapter must have exactly five bounded lifecycle timers"
   if rg -q 'IpcHandler \{|Loader \{|panelSource|panelComponent|registeredWidget' \
       "$bluetooth_adapter"; then
     fail "$bluetooth_adapter still owns IPC or loads a foreign UI component"
   fi
 done
-rg -U -q 'id: discoveryRetry[^}]*repeat: true[^}]*running: root\.sessionCount > 0 && root\.adapterAvailable[^}]*root\.radioEnabled && !root\.discovering' \
+rg -U -q 'id: discoveryRetry[^}]*repeat: true[^}]*running: root\.sessionCount > 0 && root\.adapterAvailable[^}]*root\.adapterEnabled && !root\.discovering' \
   "$bluetooth_service" \
   || fail "Bluetooth service does not bound discovery retries to an open session"
 if rg -q 'registeredWidget|registeredSource|registeredComponent|panelSource|panelComponent|Loader \{' \
@@ -921,8 +1013,6 @@ fi
 if rg -q 'Process \{|FileView \{' "$bluetooth_service" "$bluetooth_adapter"; then
   fail "Bluetooth native owner uses a worker instead of native APIs"
 fi
-rg -q 'childPanelWidget\("omarchy\.bluetooth"\)' tests/bluetooth-plugin-smoke.qml \
-  || fail "Bluetooth alias routing is not regression-tested against shipped code"
 rg -Fq 'result.ok === true' "$bluetooth_panel" \
   || fail "Bluetooth panel treats structured action results as booleans"
 [[ -f tests/bluetooth-device-identity-regression.qml ]] \
@@ -930,9 +1020,8 @@ rg -Fq 'result.ok === true' "$bluetooth_panel" \
 
 [[ $(rg -c 'SystemTelemetry \{' hancore.shibumi.telemetry/Service.qml) -eq 1 ]] \
   || fail "system telemetry must have one process-wide owner"
-if rg -q 'Process \{' hancore.shibumi.telemetry/SystemTelemetry.qml; then
-  fail "system telemetry must read procfs without child processes"
-fi
+[[ $(rg -c 'Process \{' hancore.shibumi.telemetry/MemorySweep.qml) -eq 1 ]] \
+  || fail "system telemetry must have one process-wide Memory Sweep worker"
 rg -q '"service": "WorkspaceService.qml"' hancore.shibumi.workspaces/manifest.json \
   || fail "workspace state must have exactly one shipped owner"
 workspace_service=hancore.shibumi.workspaces/WorkspaceService.qml
@@ -960,6 +1049,31 @@ rg -q 'stateService\.setLayout' hancore.shibumi.bar/core/LayoutController.qml \
   || fail "layout mutations bypass the process-wide state owner"
 rg -q 'layoutController: barWindow\.bar\.layoutController' hancore.shibumi.bar/core/BarPanel.qml \
   || fail "per-output drag session does not consume shared layout state"
+for drag_geometry_contract in \
+  'property real originX: 0' \
+  'property real originY: 0' \
+  'property string geometryKey: ""' \
+  'onOriginXChanged: cancelForGeometryChange()' \
+  'onOriginYChanged: cancelForGeometryChange()' \
+  'onGeometryKeyChanged: cancelForGeometryChange()' \
+  'function toOutputPoint(localX, localY)' \
+  'function targetAtOutput(outputX, outputY)'; do
+  rg -Fq "$drag_geometry_contract" hancore.shibumi.bar/core/DragSession.qml \
+    || fail "drag output-geometry contract drifted: $drag_geometry_contract"
+done
+for bound_geometry_contract in \
+  'originX: barWindow.bar.vertical && barWindow.bar.position === "right"' \
+  'originY: !barWindow.bar.vertical && barWindow.bar.position === "bottom"' \
+  'geometryKey: JSON.stringify([' \
+  'String(barWindow.screen.name || "")' \
+  'Number(barWindow.screen.width) || 0' \
+  'Number(barWindow.screen.height) || 0' \
+  'Number(barWindow.screen.devicePixelRatio) || 1' \
+  'String(barWindow.bar.position || "")' \
+  'Number(barWindow.bar.barSize) || 0'; do
+  rg -Fq "$bound_geometry_contract" hancore.shibumi.bar/core/BarPanel.qml \
+    || fail "bar does not bind complete primitive drag geometry: $bound_geometry_contract"
+done
 rg -q 'item\.layoutSession = dragSession' hancore.shibumi.bar/core/BarPanel.qml \
   || fail "bar surface does not receive its per-output drag session"
 if rg -q 'LayoutController \{|DragSession \{' styles; then
@@ -973,11 +1087,26 @@ rg -q 'serviceFor\("hancore\.shibumi\.workspaces"\)' "$workspace_widget" \
   || fail "workspace widget does not resolve the shipped service"
 rg -q '^ShibumiPanel \{' "$workspace_panel" \
   || fail "workspace panel does not use the screen-local keyboard panel contract"
-if rg -q 'Process \{|Timer \{|FileView \{' \
-    "$workspace_service" "$workspace_widget" "$workspace_panel" \
-    "$workspace_panel_content"; then
-  fail "workspace state and views must remain event-driven and worker-free"
+if rg -q 'Process \{|Timer \{' "$workspace_service" \
+  || rg -q 'Process \{|Timer \{|FileView \{' \
+    "$workspace_widget" "$workspace_panel" "$workspace_panel_content"; then
+  fail "workspace service must not poll; views must remain worker-free"
 fi
+[[ $(rg -c 'FileView[[:space:]]*\{' "$workspace_service") -eq 1 ]] \
+  || fail "workspace service must own exactly one host connector-map reader"
+for workspace_map_contract in \
+    'path: root.backendAdmitted' \
+    '? (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state")' \
+    '+ (legacy ? "/omarchy/monitor-workspaces"' \
+    ': "/omarchy/monitors/workspaces") : ""' \
+    'watchChanges: root.backendAdmitted' \
+    'onFileChanged: { legacy = false; reload() }' \
+    'onLoaded: root.blocks = WorkspaceModel.readBlocks(text())' \
+    'if (root.backendAdmitted && !legacy) legacy = true' \
+    'onBackendAdmittedChanged: if (!backendAdmitted) blocks = ({})'; do
+  rg -Fq "$workspace_map_contract" "$workspace_service" \
+    || fail "workspace connector-map admission drifted: $workspace_map_contract"
+done
 if rg -q 'Quickshell\.Hyprland|Hyprland\.' \
     "$workspace_widget" "$workspace_panel" "$workspace_panel_content"; then
   fail "workspace views must consume the shared workspace service"
@@ -1004,8 +1133,12 @@ if rg -q 'CACHE_FILE|stale_last' \
     hancore.shibumi.ai/scripts/opencode-usage; then
   fail "OpenCode provider must not persist a V1 usage cache"
 fi
-if rg -q 'Process \{|Timer \{|FileView \{' \
+# Approved reset-countdown display: one open-only clock, with no provider work.
+if rg -Uq '\b(Process|Timer|FileView)[[:space:]]*\{' \
     hancore.shibumi.ai/BarWidget.qml \
+  || rg -Uq '\b(Process|FileView)[[:space:]]*\{' hancore.shibumi.ai/AiUsagePanel.qml \
+  || [[ $(rg -Uo '\bTimer[[:space:]]*\{' hancore.shibumi.ai/AiUsagePanel.qml | wc -l) -ne 1 ]] \
+  || ! rg -Uq '^  property Timer presentationClock: Timer \{\n    id: panelClock\n    interval: 30000; repeat: true; running: panel\.open\n    onTriggered: panel\.nowMs = Date\.now\(\)\n  \}$' \
     hancore.shibumi.ai/AiUsagePanel.qml; then
   fail "AI views must not own provider polling or file watchers"
 fi
@@ -1062,7 +1195,6 @@ for pair in \
   'hancore.shibumi.brightness/BrightnessPanel.qml:panel.controlActiveFillColor' \
   'hancore.shibumi.brightness/BrightnessPanel.qml:panel.controlBorderColor' \
   'hancore.shibumi.network/NetworkPanel.qml:panel.controlBorderColor' \
-  'hancore.shibumi.power-profile/PowerProfilePanel.qml:panel.controlBorderColor' \
   'hancore.shibumi.workspaces/WorkspacePanelContent.qml:root.controller.controlFillColor'; do
   file=${pair%%:*}
   token=${pair#*:}
@@ -1165,6 +1297,7 @@ while IFS= read -r plugin_id; do
 done < <(jq -r '.plugins[].id' contracts/plugin-suite-v1.json)
 
 "$repo_root/tests/style-contract-regression.sh"
+"$repo_root/tests/panel-window-geometry-regression.sh"
 "$repo_root/tests/picker-helper-regression.sh"
 "$repo_root/tests/plugin-suite-contract-regression.sh"
 "$repo_root/tests/plugin-self-containment-regression.sh"
@@ -1285,10 +1418,22 @@ OMARCHY_PATH="$OMARCHY_PATH" "$repo_root/tests/state-service-regression.sh"
   done
   official_monitor_panel=${OMARCHY_PATH}/shell/plugins/panels/monitor/Panel.qml
   [[ -s $official_monitor_panel ]] || fail "official Quattro monitor panel is missing"
+  monitor_old_shape=0; monitor_new_shape=0
+  if rg -Fq enabledDisplayCount "$official_monitor_panel" && rg -Fq toggleDisplay "$official_monitor_panel"; then monitor_old_shape=1; fi
+  if rg -Fq 'function previewBrightness(name, value)' "$official_monitor_panel" \
+      && rg -Fq 'function setScale(name, scale)' "$official_monitor_panel" \
+      && rg -Fq 'function runAction(' "$official_monitor_panel"; then monitor_new_shape=1; fi
+  (( monitor_old_shape + monitor_new_shape == 1 )) || fail 'official monitor panel must have exactly one complete shape'
+  monitor_shape_contracts=(enabledDisplayCount toggleDisplay)
+  if (( monitor_new_shape )); then
+    monitor_shape_contracts=('function previewBrightness(name, value)'
+      'function setScale(name, scale)' 'function runAction(')
+  fi
+  printf 'Monitor shape contract: %s\n' "${monitor_shape_contracts[*]}"
   for monitor_contract in brightnessAvailable brightnessPercent refresh \
     setBrightness previewBrightness monitorScale setScale displays \
-    enabledDisplayCount toggleDisplay normalizeScale brightnessName; do
-    rg -q "${monitor_contract}" "$official_monitor_panel" \
+    normalizeScale "${monitor_shape_contracts[@]}"; do
+    rg -Fq "${monitor_contract}" "$official_monitor_panel" \
       || fail "official monitor panel contract changed: $monitor_contract"
   done
   official_power_panel=${OMARCHY_PATH}/shell/plugins/panels/power/Panel.qml
@@ -1327,8 +1472,25 @@ OMARCHY_PATH="$OMARCHY_PATH" "$repo_root/tests/state-service-regression.sh"
       rg -q "$status_contract" "$official_notification_service" \
         || fail "official legacy notification contract changed: $status_contract"
     done
+  elif rg -Fq 'service.stateDir + "/history.json"' "$official_notification_service"; then
+    # The plugin proxy grants DND only; Recent consumes documented disk state,
+    # not the root service's private models or toast mutation methods.
+    for status_contract in doNotDisturb setDoNotDisturb; do
+      rg -q "$status_contract" "$official_notification_service" \
+        && rg -q "$status_contract" "${OMARCHY_PATH}/shell/services/PluginFirstPartyServiceApi.qml" \
+        || fail "official notification proxy contract changed: $status_contract"
+    done
+    rg -Fq 'Quickshell.env("HOME") + "/.local/state/omarchy/notifications"' "$official_notification_service" \
+      || fail 'official notification state directory changed'
+    for status_contract in '"key"' 'ts: Date.now() / 1000' closed_ts closed_reason 'function parseHistory('; do
+      rg -Fq "$status_contract" "${official_notification_service%/*}/Store.js" \
+        || fail "official notification history format changed: $status_contract"
+    done
+    [[ $SHIBUMI_OMARCHY_BASELINE_PROFILE == installed-package ]] \
+      || rg -Fq 'history.json`: closed rows, newest first' "${OMARCHY_PATH}/docs/notifications.md" \
+      || fail 'official notification history persistence is no longer documented'
   else
-    fail "official notification service exposes neither current nor legacy model contract"
+    fail "official notification service exposes no supported model or history.json contract"
   fi
 
   host_has_module() {
@@ -1351,17 +1513,122 @@ OMARCHY_PATH="$OMARCHY_PATH" "$repo_root/tests/state-service-regression.sh"
     | tr -d '"' | sort -u)
 
   smoke_root=$(mktemp -d)
-  trap 'rm -rf -- "$smoke_root"' EXIT
+  fixture_group_pid=
+  fixture_group_pgid=
+  fixture_parent_pgid=$(ps -o pgid= -p "$BASHPID" | tr -d ' ')
+  [[ $fixture_parent_pgid =~ ^[0-9]+$ ]] \
+    || fail "could not identify the contract runner process group"
+  fixture_pid_alive() {
+    [[ -n $fixture_group_pid ]] && kill -0 -- "$fixture_group_pid" 2>/dev/null
+  }
+  fixture_group_alive() {
+    [[ -n $fixture_group_pid \
+      && $fixture_group_pgid == "$fixture_group_pid" \
+      && $fixture_group_pgid != "$fixture_parent_pgid" ]] \
+      && kill -0 -- "-$fixture_group_pgid" 2>/dev/null
+  }
+  signal_fixture_group() {
+    local signal
+    signal=$1
+    [[ -n $fixture_group_pid \
+      && $fixture_group_pgid == "$fixture_group_pid" \
+      && $fixture_group_pgid != "$fixture_parent_pgid" ]] \
+      || return 1
+    kill -s "$signal" -- "-$fixture_group_pgid" 2>/dev/null
+  }
+  stop_fixture_group() {
+    local group_term_sent
+    group_term_sent=false
+    [[ -n $fixture_group_pid && $fixture_group_pgid == "$fixture_group_pid" ]] || return 0
+    if ! fixture_group_alive && fixture_pid_alive; then
+      kill -TERM -- "$fixture_group_pid" 2>/dev/null || true
+    fi
+    if fixture_group_alive; then
+      signal_fixture_group TERM || true
+      group_term_sent=true
+    fi
+    for _ in {1..20}; do
+      if fixture_group_alive; then
+        if [[ $group_term_sent == false ]]; then
+          signal_fixture_group TERM || true
+          group_term_sent=true
+        fi
+      elif ! fixture_pid_alive; then
+        break
+      fi
+      sleep 0.05
+    done
+    fixture_pid_alive && kill -KILL -- "$fixture_group_pid" 2>/dev/null || true
+    fixture_group_alive && signal_fixture_group KILL || true
+    for _ in {1..20}; do fixture_group_alive || break; sleep 0.05; done
+    wait "$fixture_group_pid" 2>/dev/null || true
+    ! fixture_group_alive
+  }
+  cleanup_smoke() {
+    if ! stop_fixture_group; then
+      printf 'contract regression failed: fixture group survived signal cleanup\n' >&2
+      return 1
+    fi
+    rm -rf -- "$smoke_root"
+  }
+  trap cleanup_smoke EXIT
+  trap 'cleanup_smoke || exit 125; exit 130' HUP INT TERM
+  run_isolated_fixture() {
+    local ticks output_file pgid rc i
+    ticks=$1
+    output_file=$2
+    pgid=
+    rc=0
+    shift 2
+    : >"$output_file"
+    setsid "$@" >"$output_file" 2>&1 &
+    fixture_group_pid=$! fixture_group_pgid=$!
+    for _ in {1..50}; do
+      pgid=$(ps -o pgid= -p "$fixture_group_pid" 2>/dev/null | tr -d ' ') || true
+      [[ -n $pgid || ! -e /proc/$fixture_group_pid ]] && break
+      sleep 0.01
+    done
+    if [[ -z $pgid && ! -e /proc/$fixture_group_pid ]]; then
+      set +e; wait "$fixture_group_pid"; rc=$?; set -e
+      stop_fixture_group || fail "fixture group survived early leader exit"
+      fixture_group_pid=
+      fixture_group_pgid=
+      return "$rc"
+    fi
+    if [[ $pgid != "$fixture_group_pgid" ]]; then
+      stop_fixture_group || fail "fixture group survived invalid ownership cleanup"
+      fixture_group_pid=
+      fixture_group_pgid=
+      fail "fixture did not own its process group"
+    fi
+    for ((i=0; i<ticks; i++)); do
+      fixture_group_alive || break
+      sleep 0.1
+    done
+    if fixture_group_alive; then
+      stop_fixture_group || fail "fixture process group survived TERM/KILL cleanup"
+      rc=124
+    else
+      set +e; wait "$fixture_group_pid"; rc=$?; set -e
+    fi
+    fixture_group_pid=
+    fixture_group_pgid=
+    return "$rc"
+  }
   mkdir -p "$smoke_root/adapters" "$smoke_root/core" "$smoke_root/services" \
-    "$smoke_root/styles/shibumi" "$smoke_root/widgets" "$smoke_root/runtime"
-  chmod 700 "$smoke_root/runtime"
+    "$smoke_root/styles/shibumi" "$smoke_root/widgets" \
+    "$smoke_root"/{home,config,cache,data,state,runtime,tmp,bin}
+  chmod 700 "$smoke_root"/{home,config,cache,data,state,runtime,tmp}
+  printf '#!/bin/sh\nexit 97\n' > "$smoke_root/bin/hyprctl"
+  printf '#!/bin/sh\nexit 97\n' > "$smoke_root/bin/fc-match"
+  chmod 700 "$smoke_root/bin"/{hyprctl,fc-match}
   cp -a "${OMARCHY_PATH}/shell/Commons" "$smoke_root/"
   cp -a "${OMARCHY_PATH}/shell/Ui" "$smoke_root/"
   cp widgets/ShibumiPanel.qml \
     hancore.shibumi.state/lib/presentation/PillSurface.qml \
     "$smoke_root/widgets/"
   cp hancore.shibumi.bar/core/BarSection.qml hancore.shibumi.bar/core/GroupRegistry.js hancore.shibumi.bar/core/GroupSlot.qml \
-    hancore.shibumi.bar/core/LayoutController.qml hancore.shibumi.bar/core/LayoutModel.js hancore.shibumi.bar/core/V2LayoutModel.js \
+    hancore.shibumi.bar/core/LayoutController.qml hancore.shibumi.bar/core/LayoutModel.js hancore.shibumi.bar/core/LayoutTransition.qml hancore.shibumi.bar/core/V2LayoutModel.js \
     hancore.shibumi.bar/core/PanelRouting.js \
     hancore.shibumi.bar/core/ResponsiveLayout.js hancore.shibumi.bar/core/RunGeometry.js \
     hancore.shibumi.bar/core/WidgetSlot.qml "$smoke_root/core/"
@@ -1371,34 +1638,221 @@ OMARCHY_PATH="$OMARCHY_PATH" "$repo_root/tests/state-service-regression.sh"
     hancore.shibumi.bar/styles/shibumi/VisualTokens.qml hancore.shibumi.bar/styles/shibumi/GapEffectsLayer.qml \
     hancore.shibumi.bar/styles/shibumi/ReactorEventLayer.qml \
     "$smoke_root/styles/shibumi/"
-  cp tests/group-renderer-regression.qml "$smoke_root/shell.qml"
+  python3 - "$repo_root" "$smoke_root/shell.qml" <<'PY'
+import sys
+from pathlib import Path
+repo, target = Path(sys.argv[1]), Path(sys.argv[2])
+bar = (repo / "hancore.shibumi.bar/Bar.qml").read_text()
+fixture = (repo / "tests/group-renderer-regression.qml").read_text()
+declaration_start = "  property var loadedOwners: []"
+declaration_end = "  property var clickTargets: []"
+function_start = "  function widgetSlotLoadAdmitted("
+function_end = "  function registerClickTarget("
+declaration_markers = [
+    "      // INJECT_BAR_LOADED_OWNER_DECLARATIONS",
+    "        // INJECT_TEARDOWN_BAR_LOADED_OWNER_DECLARATIONS",
+]
+function_markers = [
+    "      // INJECT_BAR_LOADED_OWNER_FUNCTIONS",
+    "        // INJECT_TEARDOWN_BAR_LOADED_OWNER_FUNCTIONS",
+]
+if any(fixture.count(marker) != 1
+        for marker in declaration_markers + function_markers):
+    raise SystemExit("loaded-owner fixture injection marker drifted")
+has_ownership = declaration_start in bar or function_start in bar
+if has_ownership:
+    if any(bar.count(anchor) != 1 for anchor in (declaration_start,
+            declaration_end, function_start, function_end)):
+        raise SystemExit("loaded-owner projection extraction anchor drifted")
+    declarations = bar[bar.index(declaration_start):bar.index(declaration_end)].rstrip()
+    functions = bar[bar.index(function_start):bar.index(function_end)].rstrip()
+else:
+    declarations = "  property var loadedOwners: []"
+    functions = ""
+for marker in declaration_markers:
+    fixture = fixture.replace(marker, declarations)
+for marker in function_markers:
+    fixture = fixture.replace(marker, functions)
+target.write_text(fixture)
+PY
+
+  early_child_file="$smoke_root/early-child.pid"
+  set +e
+  (
+    trap - EXIT HUP INT TERM
+    ps() { sleep 0.1; command ps "$@"; }
+    run_isolated_fixture 10 "$smoke_root/early-leader.log" \
+      /bin/sh -c '/bin/sh -c '\''sleep 30'\'' & echo $! >"$1"; exit 23' \
+      fixture "$early_child_file"
+  )
+  early_leader_rc=$?
+  set -e
+  [[ $early_leader_rc -eq 23 ]] \
+    || fail "early fixture leader exit did not preserve status 23"
+  early_child_pid=$(<"$early_child_file")
+  [[ $early_child_pid =~ ^[0-9]+$ ]] \
+    || fail "early fixture leader did not publish its child PID"
+  for _ in {1..20}; do
+    kill -0 "$early_child_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  kill -0 "$early_child_pid" 2>/dev/null \
+    && fail "early fixture leader left a living process-group child"
+
+  startup_leader_file="$smoke_root/startup-leader.pid"
+  startup_child_file="$smoke_root/startup-child.pid"
+  set +e
+  (
+    trap - EXIT HUP INT
+    trap 'stop_fixture_group || exit 125; exit 130' TERM
+    startup_signal_target=$BASHPID
+    ps() { sleep 0.2; command ps "$@"; }
+    run_isolated_fixture 10 "$smoke_root/startup-signal.log" \
+      /bin/sh -c 'trap "" TERM; echo $$ >"$1"; /bin/sh -c '\''trap "" TERM; sleep 30'\'' & echo $! >"$2"; kill -TERM "$3"; wait' \
+      fixture "$startup_leader_file" "$startup_child_file" "$startup_signal_target"
+  )
+  startup_signal_rc=$?
+  set -e
+  [[ $startup_signal_rc -eq 130 ]] \
+    || fail "startup signal cleanup exited $startup_signal_rc instead of 130"
+  startup_leader_pid=$(<"$startup_leader_file")
+  startup_child_pid=$(<"$startup_child_file")
+  [[ $startup_leader_pid =~ ^[0-9]+$ && $startup_child_pid =~ ^[0-9]+$ ]] \
+    || fail "startup signal fixture did not publish exact owned PIDs"
+  [[ $startup_leader_pid != "$fixture_parent_pgid" ]] \
+    || fail "startup fixture unexpectedly matched the contract runner process group"
+  for _ in {1..20}; do
+    if ! kill -0 -- "-$startup_leader_pid" 2>/dev/null \
+        && ! kill -0 -- "$startup_child_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.05
+  done
+  kill -0 -- "-$startup_leader_pid" 2>/dev/null \
+    && fail "startup signal left the exact owned fixture group alive"
+  kill -0 -- "$startup_child_pid" 2>/dev/null \
+    && fail "startup signal left the exact owned fixture child alive"
+
+  ipc_child_file="$smoke_root/ipc-child.pid"
+  set +e
+  run_isolated_fixture 10 "$smoke_root/hanging-ipc.log" \
+    /bin/sh -c 'trap "" TERM; /bin/sh -c '\''trap "" TERM; sleep 30'\'' & echo $! >"$1"; wait' \
+    fixture "$ipc_child_file"
+  hanging_ipc_rc=$?
+  set -e
+  [[ $hanging_ipc_rc -eq 124 ]] \
+    || fail "controlled hanging IPC child did not exercise timeout cleanup"
+  ipc_child_pid=$(<"$ipc_child_file")
+  [[ $ipc_child_pid =~ ^[0-9]+$ ]] || fail "hanging IPC child did not publish its PID"
+  kill -0 "$ipc_child_pid" 2>/dev/null \
+    && fail "controlled hanging IPC child survived process-group cleanup"
 
   set +e
-  group_renderer_output=$(timeout 5 env \
-    QT_QPA_PLATFORM=offscreen \
-    XDG_RUNTIME_DIR="$smoke_root/runtime" \
-    /usr/bin/quickshell -p "$smoke_root" 2>&1)
+  run_isolated_fixture 50 "$smoke_root/group-renderer.log" env \
+    -u DISPLAY -u WAYLAND_DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE -u QS_CONFIG_PATH \
+    HOME="$smoke_root/home" XDG_CONFIG_HOME="$smoke_root/config" \
+    XDG_CACHE_HOME="$smoke_root/cache" XDG_DATA_HOME="$smoke_root/data" \
+    XDG_STATE_HOME="$smoke_root/state" XDG_RUNTIME_DIR="$smoke_root/runtime" \
+    TMPDIR="$smoke_root/tmp" PATH="$smoke_root/bin:/usr/bin" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$smoke_root/runtime/no-session-bus" \
+    DBUS_SYSTEM_BUS_ADDRESS="unix:path=$smoke_root/runtime/no-system-bus" \
+    QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= \
+    QT_QUICK_BACKEND=software QSG_RHI_BACKEND=software QT_OPENGL=software \
+    /usr/bin/quickshell -p "$smoke_root"
   group_renderer_rc=$?
   set -e
+  group_renderer_output=$(<"$smoke_root/group-renderer.log")
   printf '%s\n' "$group_renderer_output"
-  [[ $group_renderer_rc -eq 0 ]] || fail "group renderer smoke exited $group_renderer_rc"
+  group_renderer_failures=()
+  [[ $group_renderer_rc -eq 0 ]] \
+    || group_renderer_failures+=("exited $group_renderer_rc")
   grep -q 'group renderer regression passed' <<<"$group_renderer_output" \
-    || fail "group renderer smoke did not reach its marker"
+    || group_renderer_failures+=("did not reach its marker")
+  grep -q 'P10_106_PRIVATE_IPC' <<<"$group_renderer_output" \
+    || group_renderer_failures+=("did not verify private IPC routing")
+  grep -q 'P10_106_ACTUAL_BAR_TEARDOWN' <<<"$group_renderer_output" \
+    || group_renderer_failures+=("did not destroy the actual Bar fixture owner")
+  grep -q 'QQmlInvalidContext' <<<"$group_renderer_output" \
+    && group_renderer_failures+=("used an invalid QML context during Bar teardown")
+  grep -q 'owner sentinel changed .* item geometry' <<<"$group_renderer_output" \
+    && group_renderer_failures+=("owner sentinel changed foreign geometry")
+  grep -Fq 'another handler is registered for target fixture.shibumi.106.native-owner' \
+    <<<"$group_renderer_output" \
+    && group_renderer_failures+=("overlapped native IPC handlers")
+  if ! python3 -c 'import re,sys
+lines=sys.stdin.read().splitlines(); events=[]
+for line in lines:
+ m=re.search(r"P10_106_(IPC_QML_DESTRUCTION|SENTINEL_DESTRUCTION) ([0-9]+)",line)
+ if m and int(m.group(2)) <= 3: events.append((m.group(1),int(m.group(2))))
+expected=[x for n in range(1,4) for x in [("IPC_QML_DESTRUCTION",n),("SENTINEL_DESTRUCTION",n)]]
+sys.exit(events != expected)' <<<"$group_renderer_output"; then
+    group_renderer_failures+=("did not preserve handler-to-sentinel destruction ordering three times")
+  fi
+  ((${#group_renderer_failures[@]} == 0)) \
+    || fail "group renderer smoke: ${group_renderer_failures[*]}"
 
-  cp tests/group-interaction-regression.qml "$smoke_root/shell.qml"
+  python3 - "$repo_root" "$smoke_root/shell.qml" <<'PY'
+import sys
+from pathlib import Path
+repo, target = Path(sys.argv[1]), Path(sys.argv[2])
+bar = (repo / "hancore.shibumi.bar/Bar.qml").read_text()
+fixture = (repo / "tests/group-interaction-regression.qml").read_text()
+def fragment(start, end):
+    if bar.count(start) != 1 or bar.count(end) != 1:
+        raise SystemExit("Bar projection extraction anchor drifted")
+    return bar[bar.index(start):bar.index(end)].rstrip()
+replacements = {
+    "      // INJECT_BAR_LOADED_OWNER_DECLARATIONS": fragment(
+        "  property var loadedOwners: []",
+        "  property var clickTargets: []"),
+    "      // INJECT_BAR_PROJECTION": fragment(
+        "  function deduplicatedUnassignedEntries(",
+        "  function pluginSpecsForLayout("),
+    "      // INJECT_BAR_SLOT_REGISTRY": fragment(
+        "  function registerModuleSlot(", "  function registerClickTarget("),
+}
+for marker, source in replacements.items():
+    if fixture.count(marker) != 1:
+        raise SystemExit("group interaction injection marker drifted")
+    fixture = fixture.replace(marker, source)
+target.write_text(fixture)
+PY
 
   set +e
-  group_interaction_output=$(timeout 5 env \
-    QT_QPA_PLATFORM=offscreen \
-    XDG_RUNTIME_DIR="$smoke_root/runtime" \
-    /usr/bin/quickshell -p "$smoke_root" 2>&1)
+  run_isolated_fixture 80 "$smoke_root/group-interaction.log" env \
+    -u DISPLAY -u WAYLAND_DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE -u QS_CONFIG_PATH \
+    HOME="$smoke_root/home" XDG_CONFIG_HOME="$smoke_root/config" \
+    XDG_CACHE_HOME="$smoke_root/cache" XDG_DATA_HOME="$smoke_root/data" \
+    XDG_STATE_HOME="$smoke_root/state" XDG_RUNTIME_DIR="$smoke_root/runtime" \
+    TMPDIR="$smoke_root/tmp" PATH="$smoke_root/bin:/usr/bin" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$smoke_root/runtime/no-session-bus" \
+    DBUS_SYSTEM_BUS_ADDRESS="unix:path=$smoke_root/runtime/no-system-bus" \
+    QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= \
+    QT_QUICK_BACKEND=software QSG_RHI_BACKEND=software QT_OPENGL=software \
+    /usr/bin/quickshell -p "$smoke_root"
   group_interaction_rc=$?
   set -e
+  group_interaction_output=$(<"$smoke_root/group-interaction.log")
   printf '%s\n' "$group_interaction_output"
   [[ $group_interaction_rc -eq 0 ]] \
     || fail "group interaction smoke exited $group_interaction_rc"
-  grep -q 'group interaction regression passed' <<<"$group_interaction_output" \
-    || fail "group interaction smoke did not reach its marker"
+  for transfer_marker in 'group interaction regression passed' \
+      'group transfer A passed' 'group transfer B passed' \
+      'failed State write retained grouped widget' \
+      'keepConfigured deck appeared once after finish'; do
+    [[ $(grep -Fc "$transfer_marker" <<<"$group_interaction_output") -eq 1 ]] \
+      || fail "group interaction smoke did not reach exactly one: $transfer_marker"
+  done
+  if grep -Fq 'another handler is registered for target fixture.p10.088.target' \
+      <<<"$group_interaction_output"; then
+    fail "group interaction smoke overlapped group/deck IPC owners"
+  fi
+  [[ $(grep -Fc 'removing.indexOf(id) >= 0' "$smoke_root/shell.qml") -eq 2 ]] \
+    || fail "pending removeIds projection is missing from a V1/V2 branch"
+  grep -Fq 'const removeIds = installed === true' hancore.shibumi.bar/Bar.qml \
+    && grep -Fq '? conflictingLayoutProviderIds(id) : [id]' \
+      hancore.shibumi.bar/Bar.qml \
+    || fail "activation no longer projects displaced provider removeIds"
 
   cp tests/v1-slot-interaction-regression.qml "$smoke_root/shell.qml"
 

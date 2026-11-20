@@ -65,6 +65,7 @@ Item {
   readonly property bool panelBorderEnabled: v2Shell
     ? presentation.panelBorder !== false : borderEnabled
   readonly property bool shadowEnabled: presentation.shadow === true
+  // Personal fork: shell surfaces stay opaque theme tokens regardless of presentation.frost.
   readonly property bool frostEnabled: false
   readonly property color paper: Commons.Color.background
   readonly property color ink: Commons.Color.foreground

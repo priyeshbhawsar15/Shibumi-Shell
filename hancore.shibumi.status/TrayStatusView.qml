@@ -9,15 +9,10 @@ Item {
 
   required property var bar
   property var trayBackend: null
-  property bool customToneActive: false
   property color contentColor: bar
     ? bar.foreground : Commons.Color.foreground
-  property color badgeContrastColor: bar
-    ? bar.background : Commons.Color.background
   readonly property color drawerIconColor: moreIcon.color
-  readonly property color drawerBadgeColor: drawerBadge.color
-  readonly property color drawerBadgeTextColor: badgeText.color
-  readonly property real badgeLayer: drawerBadge.z
+  readonly property rect drawerInk: moreIcon.mapToItem(root, moreIcon.symbolInk)
   readonly property var pinnedItems: trayBackend
     && Array.isArray(trayBackend.pinnedItems) ? trayBackend.pinnedItems : []
   readonly property int drawerCount: trayBackend
@@ -91,16 +86,35 @@ Item {
           if (root.bar) root.bar.unregisterClickTarget(trayDelegate)
         }
 
-        Image {
+        Item {
+          id: trayIconSlot
           anchors.centerIn: parent
           anchors.horizontalCenterOffset: root.pinnedIconHorizontalOffset
-          source: String(trayDelegate.modelData.icon || "")
-          sourceSize.width: Commons.Style.space(14)
-          sourceSize.height: Commons.Style.space(14)
           width: Commons.Style.space(14)
           height: Commons.Style.space(14)
-          fillMode: Image.PreserveAspectFit
-          smooth: true
+
+          Presentation.BarInk { id: iconPlacement; target: trayIconSlot }
+          Image {
+            id: trayIcon
+            source: String(trayDelegate.modelData.icon || "")
+            sourceSize: Qt.size(Math.round(parent.width * iconPlacement.dpr),
+              Math.round(parent.height * iconPlacement.dpr))
+            width: sourceSize.width / iconPlacement.dpr
+            height: sourceSize.height / iconPlacement.dpr
+            x: iconPlacement.snapX((parent.width - width) / 2)
+            y: iconPlacement.rectangleY(height)
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+            mipmap: true
+          }
+
+          Presentation.BarGlyph {
+            visible: trayIcon.status !== Image.Ready
+            anchors.fill: parent
+            text: "󰀻"
+            font.family: Commons.Style.font.family
+            color: root.contentColor
+          }
         }
 
         MouseArea {
@@ -159,8 +173,9 @@ Item {
         if (root.bar && registered) root.bar.unregisterClickTarget(drawerToggle)
       }
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
         id: moreIcon
+        optical: !root.bar || !root.bar.vertical
         anchors.centerIn: parent
         text: "\uE5D3"
         font.pixelSize: 16
@@ -170,36 +185,6 @@ Item {
             root.contentColor.b, root.contentColor.a * 0.7)
 
         Behavior on color { ColorAnimation { duration: 150 } }
-      }
-
-      Rectangle {
-        id: drawerBadge
-        visible: root.drawerCount > 0
-        width: Math.max(Commons.Style.space(12), badgeText.implicitWidth + 6)
-        height: Commons.Style.space(12)
-        radius: height / 2
-        color: root.customToneActive
-          ? root.contentColor
-          : root.bar ? root.bar.urgent : Commons.Color.accent
-        border.width: 0
-        border.color: "transparent"
-        z: 10
-        anchors.verticalCenter: moreIcon.verticalCenter
-        anchors.verticalCenterOffset: -6
-        anchors.horizontalCenter: moreIcon.horizontalCenter
-        anchors.horizontalCenterOffset: 7
-
-        Text {
-          id: badgeText
-          anchors.centerIn: parent
-          text: root.drawerCount > 99 ? "99" : String(root.drawerCount)
-          color: root.customToneActive
-            ? root.badgeContrastColor
-            : root.bar ? root.bar.background : Commons.Color.background
-          font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
-          font.pixelSize: 7
-          font.weight: Font.Bold
-        }
       }
 
       MouseArea {

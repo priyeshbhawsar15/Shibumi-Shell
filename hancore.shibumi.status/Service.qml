@@ -11,10 +11,12 @@ Item {
   id: root
 
   property var shell: null
+  property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   property var manifest: null
+  SuiteRuntime.HostShell { id: suiteShell; host: root.shell }
   SuiteRuntime.Provider {
     pluginId: "hancore.shibumi.status"
-    implementationVersion: "0.1.1-beta.14.1"
+    implementationVersion: "0.2.5"
     owner: root
     host: root.shell
     manifest: root.manifest
@@ -22,9 +24,7 @@ Item {
   property var actionRunner: null
   property bool runtimeProbesEnabled: true
 
-  readonly property var idleService: shell
-    && typeof shell.firstPartyServiceFor === "function"
-    ? shell.firstPartyServiceFor("omarchy.idle") : null
+  readonly property var idleService: suiteShell.firstPartyServiceFor("omarchy.idle")
   readonly property var notificationService: notificationAdapter.available
     ? notificationAdapter : null
   readonly property bool stayAwake: idleService
@@ -34,10 +34,15 @@ Item {
 
   NotificationAdapter {
     id: notificationAdapter
+    omarchyPath: root.omarchyPath
   }
 
-  onShellChanged: notificationAdapter.attachShell(shell)
-  Component.onCompleted: notificationAdapter.attachShell(shell)
+  onShellChanged: notificationAdapter.attachShell(suiteShell)
+  Component.onCompleted: notificationAdapter.attachShell(suiteShell)
+  Connections {
+    target: suiteShell.scoped ? SuiteRuntime.Runtime : null
+    function onRevisionChanged() { notificationAdapter.attachShell(suiteShell) }
+  }
 
   property string recordingPid: ""
   property int recordingElapsed: 0
@@ -49,6 +54,7 @@ Item {
   property string voxtypeState: "idle"
   property string voxtypeHint: ""
   property bool voxtypeAvailable: false
+  property bool voxtypeRetryEnabled: true
   readonly property bool voxtypeActive: voxtypeState === "recording"
     || voxtypeState === "transcribing"
 
@@ -139,14 +145,31 @@ Item {
     onFileChanged: {
       reload()
       root.refreshRecording()
+      recordingRetry.restart()
     }
     onLoaded: root.refreshRecording()
     onLoadFailed: root.refreshRecording()
   }
 
+  FileView {
+    path: Quickshell.env("XDG_RUNTIME_DIR") + "/omarchy-screenrecord-filename"
+    watchChanges: root.runtimeProbesEnabled
+    printErrors: false
+    onFileChanged: { reload(); root.refreshRecording(); recordingRetry.restart() }
+    onLoaded: root.refreshRecording()
+    onLoadFailed: root.refreshRecording()
+  }
+
+  // Markers survive video finalization; pidwait observes exit without polling.
+  Process {
+    command: ["pidwait", "-p", root.recordingPid]
+    running: root.runtimeProbesEnabled && root.recordingPid !== ""
+    onExited: { root.refreshRecording(); recordingRetry.restart() }
+  }
+
   Process {
     id: recordingProbe
-    command: ["pgrep", "-o", "-f", "^gpu-screen-recorder"]
+    command: ["pgrep", "-o", "-f", "^(gpu-screen-recorder|wf-recorder)( |$)"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.setRecordingPid(text)
@@ -195,12 +218,13 @@ Item {
 
   Process {
     id: voxtypeStatus
-    command: ["bash", "-lc", "exec omarchy-voxtype-status"]
+    command: ["bash", "-c", "if command -v omarchy-voxtype-status >/dev/null 2>&1; then exec omarchy-voxtype-status; elif command -v voxtype >/dev/null 2>&1; then exec setpriv --pdeathsig TERM voxtype status --follow --extended --format json; else exit 69; fi"]
     running: root.runtimeProbesEnabled
     stdout: SplitParser {
       onRead: function(data) { root.updateVoxtype(data) }
     }
-    onExited: {
+    onExited: function(exitCode) {
+      root.voxtypeRetryEnabled = exitCode !== 69
       root.voxtypeAvailable = false
       root.voxtypeState = "idle"
       root.voxtypeHint = ""
@@ -209,7 +233,7 @@ Item {
 
   Timer {
     interval: 60000
-    running: root.runtimeProbesEnabled && !voxtypeStatus.running
+    running: root.runtimeProbesEnabled && root.voxtypeRetryEnabled && !voxtypeStatus.running
     repeat: true
     onTriggered: voxtypeStatus.running = true
   }

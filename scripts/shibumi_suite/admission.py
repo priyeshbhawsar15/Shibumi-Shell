@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import MANAGED_MARKER, STATE_SCHEMA_VERSION, SUITE_ID
+from .config import ConfigError, native_sections
 from .model import Suite, payload_path_excluded, suite_payload_digest
 from .runtime import RuntimePaths
 
@@ -116,6 +117,7 @@ ROLLBACK_PHASES = {
     "recovery-required",
 }
 JOURNAL_KEYS = {
+    "bootId",
     "schemaVersion",
     "suiteId",
     "token",
@@ -511,6 +513,13 @@ def classify_install_state(
         or type(state["menuExtension"].get("createdFile")) is not bool
     ):
         raise AdmissionError("installation metadata values are malformed")
+    previous_layout = state.get("previousBar", {}).get("layout", {})
+    if not isinstance(previous_layout, dict):
+        raise AdmissionError("previous bar layout is malformed")
+    try:
+        native_sections(previous_layout)
+    except ConfigError as error:
+        raise AdmissionError("previous bar layout is malformed") from error
     if "migratedFrom" in state:
         migrated = state["migratedFrom"]
         if (
@@ -898,6 +907,13 @@ def _classify_journal(
             or schema != JOURNAL_SCHEMA_VERSION \
             or journal.get("suiteId") != SUITE_ID:
         errors.append(f"unknown transaction journal schema: {directory}")
+    if "bootId" in journal and (
+        not isinstance(journal["bootId"], str)
+        or re.fullmatch(
+            r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", journal["bootId"]
+        ) is None
+    ):
+        errors.append(f"transaction bootId is malformed: {directory}")
     if journal.get("token") != token:
         errors.append(f"transaction token mismatch: {directory}")
     phase_value = journal.get("phase")
@@ -1611,7 +1627,7 @@ def _bounded_plugin_payload_digest(
             digest.update(b"file\0")
             digest.update(relative.encode("utf-8"))
             digest.update(b"\0")
-            digest.update(f"{before.st_mode & 0o111:o}".encode("ascii"))
+            digest.update(("111" if before.st_mode & 0o100 else "0").encode("ascii"))
             digest.update(b"\0")
             remaining = before.st_size
             while remaining:
@@ -1764,7 +1780,8 @@ def preflight_lifecycle_state(
     ]
     if public_transactions and not allow_pending_recovery:
         raise AdmissionError(
-            "an admitted interrupted transaction requires recovery before status"
+            "an admitted interrupted transaction requires recovery before status; "
+            "rerun the interrupted suite command (for example update --dry-run) to recover it"
         )
 
     state_path = paths.state_dir / "install.json"

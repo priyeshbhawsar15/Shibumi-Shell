@@ -4,6 +4,8 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/tests/lib/baselines.sh"
+source "$repo_root/tests/lib/qs-runner.sh"
+source "$repo_root/tests/lib/host-diagnostics.sh"
 shibumi_load_omarchy_baseline
 omarchy_path=$OMARCHY_PATH
 quickshell_bin=${QUICKSHELL_BIN:-/usr/bin/quickshell}
@@ -19,32 +21,205 @@ fail() {
 [[ -d $omarchy_path/shell/Ui ]] || fail "Omarchy Ui not found"
 [[ -x $quickshell_bin ]] || fail "Quickshell not found"
 
-mkdir -p "$tmpdir/runtime" "$tmpdir/status"
-chmod 700 "$tmpdir/runtime"
+mkdir -p "$tmpdir/status"
 cp -a -- "$repo_root/hancore.shibumi.status/." "$tmpdir/status/"
 shibumi_stage_suite_runtime "$repo_root" "$tmpdir"
 cp -a -- "$omarchy_path/shell/Commons" "$tmpdir/Commons"
 cp -a -- "$omarchy_path/shell/Ui" "$tmpdir/Ui"
 cp -- "$repo_root/tests/notification-adapter-smoke.qml" "$tmpdir/shell.qml"
 
-set +e
-output=$(timeout 8 env \
-  QT_QPA_PLATFORM=offscreen \
-  WAYLAND_DISPLAY= \
-  XDG_RUNTIME_DIR="$tmpdir/runtime" \
-  QML_IMPORT_PATH="$omarchy_path/shell${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}" \
-  QML2_IMPORT_PATH="$omarchy_path/shell${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}" \
-  "$quickshell_bin" -p "$tmpdir" 2>&1)
-rc=$?
-set -e
-printf '%s\n' "$output"
-
-[[ $rc -eq 0 ]] || fail "smoke exited $rc"
-grep -Fq 'notification adapter smoke passed' <<<"$output" \
-  || fail 'success marker missing'
-if grep -Eq 'Binding loop|TypeError|ReferenceError|is not a type|failed to load' \
-    <<<"$output"; then
-  fail 'runtime log contains a composition error'
+run_case() {
+  local name=$1 expected=$2 history_mode=$3
+  local marker=${4:-notification adapter smoke passed}
+  local race=${5:-} mutation=${6:-} path=/usr/bin:/bin
+  local root="$tmpdir/$name" output="$tmpdir/$name.log"
+  local proxy_app='Proxy App $(printf unsafe); "quoted"'
+  mkdir -p "$root"/{home,config,cache,state,data,runtime,tmp,pipewire}
+  chmod 700 "$root/runtime"
+  if [[ -n $race ]]; then
+    mkdir "$root/bin"
+    if [[ $race == mutation-replace ]]; then
+      printf '#!/bin/sh\nsleep 0.25\nexec /usr/bin/bash "$@"\n' \
+        >"$root/bin/bash"
+      chmod 755 "$root/bin/bash"
+    elif [[ $race == refresh || $race == same-refresh ]]; then
+      cat >"$root/bin/awk" <<'EOF'
+#!/bin/sh
+for last do :; done
+file=${last%/*}/fixture.json
+if mkdir "$SHIBUMI_HELPER_STATE" 2>/dev/null; then
+  sleep 0.25
+  printf '%s\t%s\n' "$file" '{"summary":"Old host history","timestamp":1}'
+else
+  printf '%s\t%s\n' "$file" '{"summary":"New host history","timestamp":2}'
 fi
+EOF
+    else
+      printf '#!/bin/sh\nsleep 0.25\nexec /usr/bin/awk "$@"\n' >"$root/bin/awk"
+    fi
+    [[ -e $root/bin/awk ]] && chmod 755 "$root/bin/awk"
+    path="$root/bin:$path"
+  fi
+  if [[ $history_mode != missing ]]; then
+    mkdir -p "$root/home/.local/state/omarchy/notifications/history"
+  fi
+  if [[ $history_mode == populated ]]; then
+    local base="$root/home/.local/state/omarchy/notifications"
+    local history="$base/history" images="$base/images"
+    mkdir -p "$images"
+    printf '%s\n' '{malformed' >"$history/000-malformed.json"
+    : >"$images/000-malformed-copy.png"
+    printf '%s\n' '{"summary":"Control filename","timestamp":999}' \
+      >"$history/"$'bad\tname.json'
+    : >"$images/"$'bad\tname-copy.png'
+    for index in {1..12}; do
+      printf '{"id":%d,"originalId":%d,"app":"Fixture","summary":"History %d","body":"<b>plain</b>","timestamp":%d}\n' \
+        "$index" "$index" "$index" "$index" >"$history/$index.json"
+      : >"$images/$index-copy.png"
+    done
+    printf 'keep\n' >"$history/keep.txt"
+    : >"$images/unrelated.png"
+    printf 'sentinel\n' >"$base/escape.json"
+    mkdir -p "$root/state/omarchy/notifications/history"
+    printf '%s\n' '{"summary":"Wrong XDG path","timestamp":999}' \
+      >"$root/state/omarchy/notifications/history/poison.json"
+  fi
+
+  if [[ $history_mode == json* ]]; then
+    local base="$root/home/.local/state/omarchy/notifications"
+    printf '%s\n' '{"summary":"Migration leftover","timestamp":999}' >"$base/history/leftover.json"
+    printf 'keep live\n' >"$base/live.json"
+    printf 'keep quiet\n' >"$base/quiet.json"
+    python3 - "$base" "$proxy_app" <<'PY'
+import json, pathlib, sys
+base = pathlib.Path(sys.argv[1])
+rows = [dict(key=f'n{i}', originalId=i, app=sys.argv[2], summary=f'History {i}',
+             ts=100-i, closed_ts=i, closed_reason='silenced' if i == 12 else 'dismissed',
+             execArgv='["touch","MUST-NOT-EXECUTE"]') for i in range(12, 0, -1)]
+(base/'history.json').write_text(json.dumps(rows))
+rows[0]['summary'] = 'Replaced'
+(base/'history.next').write_text(json.dumps(rows[:1]))
+PY
+    [[ $history_mode != json-bad ]] || printf '{malformed\n' >"$base/history.json"
+    cp "$base/history.json" "$root/original.json"
+    cp "$base/history.next" "$root/replaced.json"
+    [[ $history_mode != json-unreadable ]] || chmod 000 "$base/history.json"
+  fi
+
+  if [[ $history_mode == proxy || $history_mode == json ]]; then
+    mkdir -p "$root/omarchy fixture/bin"
+    printf '#!/bin/sh\nprintf '\''%%s\\0'\'' "$0" "$@" >"$SHIBUMI_FOCUS_ARGV"\n' \
+      >"$root/omarchy fixture/bin/omarchy-hyprland-focus-app"
+    chmod 755 "$root/omarchy fixture/bin/omarchy-hyprland-focus-app"
+    : >"$root/focus.argv"
+    printf '%s\0' "$root/omarchy fixture/bin/omarchy-hyprland-focus-app" "$proxy_app" >"$root/expected.argv"
+  fi
+
+  local -a qs_fixture_env=(-i
+    HOME="$root/home" \
+    XDG_CONFIG_HOME="$root/config" \
+    XDG_CACHE_HOME="$root/cache" \
+    XDG_STATE_HOME="$root/state" \
+    XDG_DATA_HOME="$root/data" \
+    XDG_RUNTIME_DIR="$root/runtime" \
+    TMPDIR="$root/tmp" \
+    PIPEWIRE_RUNTIME_DIR="$root/pipewire" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$root/no-session-bus" \
+    DBUS_SYSTEM_BUS_ADDRESS="unix:path=$root/no-system-bus" \
+    WAYLAND_DISPLAY= \
+    QT_QPA_PLATFORM=offscreen \
+    QT_QUICK_BACKEND=software \
+    QSG_RHI_BACKEND=software \
+    PATH="$path" \
+    LANG=C.UTF-8 \
+    SHIBUMI_EXPECTED_HISTORY_COUNT="$expected" \
+    SHIBUMI_HISTORY_RACE="$race" \
+    SHIBUMI_HISTORY_MUTATION="$mutation" \
+    SHIBUMI_HISTORY_MODE="$history_mode" \
+    SHIBUMI_HELPER_STATE="$root/helper-state" \
+    OMARCHY_PATH="$root/omarchy fixture" \
+    SHIBUMI_FOCUS_ARGV="$root/focus.argv" \
+    SHIBUMI_PROXY_APP="$proxy_app" \
+    QML_IMPORT_PATH="$omarchy_path/shell" \
+    QML2_IMPORT_PATH="$omarchy_path/shell" \
+  )
+  local -a qs_fixture_args=(--no-color)
+  set +e
+  qs_run_fixture "$tmpdir/shell.qml" "$root" 8 >"$output" 2>&1
+  local rc=$?
+  set -e
+  cat "$output"
+  [[ $rc -eq 0 ]] || fail "$name smoke exited $rc"
+  grep -Fq "$marker" "$output" || fail "$name success marker missing"
+  if grep -Eq "$HOST_DIAGNOSTICS_COMPOSITION" "$output"; then
+    fail "$name runtime log contains a composition error"
+  fi
+  if [[ $history_mode == json* ]]; then
+    [[ ! -e $root/focus.argv.mutation && ! -e $tmpdir/MUST-NOT-EXECUTE ]] || fail 'JSON history dispatched a command'
+    [[ $(<"$base/live.json") == 'keep live' && $(<"$base/quiet.json") == 'keep quiet' \
+      && -e $base/history/leftover.json ]] || fail 'JSON history mutated host files'
+    chmod 600 "$base/history.json"
+    if [[ $history_mode == json ]]; then
+      cmp -s "$root/replaced.json" "$base/history.json" || fail 'JSON replacement changed'
+    else
+      cmp -s "$root/original.json" "$base/history.json" || fail 'invalid JSON history changed'
+    fi
+  fi
+  if [[ $history_mode == proxy || $history_mode == json ]]; then
+    cmp -s "$root/expected.argv" "$root/focus.argv" || fail 'proxy focus helper argv differs'
+    printf '259_PROXY_HELPER_ARGV exact [helper, app]\n'
+  fi
+  if [[ $mutation == dismiss ]]; then
+    [[ ! -e $history/12.json && -e $history/11.json && -e $history/1.json \
+      && -e "$history/"$'bad\tname.json' ]] \
+      || fail 'dismiss did not remove only the selected history file'
+    [[ ! -e $images/12-copy.png && -e $images/11-copy.png \
+      && -e $images/unrelated.png && -e $base/escape.json ]] \
+      || fail 'dismiss removed the wrong image or escaped history'
+  elif [[ $mutation == clear ]]; then
+    ! compgen -G "$history/*.json" >/dev/null \
+      || fail 'clear left history JSON files'
+    [[ -e $history/keep.txt && -e $images/unrelated.png \
+      && -e $base/escape.json ]] \
+      || fail 'clear removed unrelated files'
+    ! compgen -G "$images/*-copy.png" >/dev/null \
+      || fail 'clear left associated history images'
+  fi
+}
+
+run_case json-history 10 json 'notification JSON history passed'
+run_case json-malformed 0 json-bad 'notification JSON history passed'
+run_case json-unreadable 0 json-unreadable 'notification JSON history passed'
+run_case proxy 0 proxy 'notification proxy badge/focus passed'
+run_case populated 10 populated
+run_case external-clear 10 populated 'notification history clear passed' '' external-clear
+run_case empty 0 empty
+run_case read-failure 0 missing
+run_case detach-race 10 populated 'notification history detach race passed' detach
+run_case replace-race 10 populated 'notification history replace race passed' replace
+run_case replace-refresh 1 missing 'notification history refresh race passed' refresh
+run_case same-host-refresh 1 missing \
+  'notification history same-refresh race passed' same-refresh
+run_case dismiss-history 10 populated \
+  'notification history dismiss passed' '' dismiss
+run_case mutation-replace 10 populated \
+  'notification history mutation replace race passed' mutation-replace dismiss
+run_case clear-history 10 populated \
+  'notification history clear passed' '' clear
+
+# UI contract: history rows close without invoking live actions,
+# and sender-controlled labels are rendered as plain text.
+grep -Fq 'onClicked: panel.selectTab("recent")' \
+  "$repo_root/hancore.shibumi.status/NotificationPanel.qml" \
+  || fail 'Recent click does not select the history tab'
+grep -Fq 'if (recent && (!historyAvailable || !showHistory())) return false' \
+  "$repo_root/hancore.shibumi.status/NotificationPanel.qml" \
+  || fail 'Recent selection does not trigger the private read'
+grep -Fq 'if (bucket === "pending" && entry' \
+  "$repo_root/hancore.shibumi.status/NotificationPanel.qml" \
+  || fail 'recent row click is not separated from the live action path'
+[[ $(grep -Fc 'textFormat: Text.PlainText' \
+  "$repo_root/hancore.shibumi.status/NotificationPanel.qml") -ge 3 ]] \
+  || fail 'app, summary, and body are not all plain text'
 
 printf 'notification adapter regression passed\n'

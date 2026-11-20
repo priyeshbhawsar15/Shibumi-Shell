@@ -6,6 +6,7 @@ import Quickshell.Io
 import qs.Commons as Commons
 import qs.Ui as Ui
 import "HostIdentity.js" as HostIdentity
+import "HealthProjection.js" as HealthProjection
 import "../hancore.shibumi.state/lib/presentation" as Presentation
 
 ShibumiPanel {
@@ -115,10 +116,6 @@ ShibumiPanel {
       return entry.userToggleable && entry.styleAvailable
         && entry.installedInBar
     }).length
-  readonly property int nativePluginCount: pluginEntries.filter(
-    function(entry) { return entry.firstParty }).length
-  readonly property int shibumiPluginCount: pluginEntries.filter(
-    function(entry) { return entry.compatibility === "Native" }).length + 1
   readonly property int registryShibumiPluginCount: pluginEntries.filter(
     function(entry) { return entry.suiteManaged }).length
   readonly property int registryOmarchyPluginCount: pluginEntries.filter(
@@ -126,10 +123,6 @@ ShibumiPanel {
   readonly property int registryExternalPluginCount: pluginEntries.filter(
     function(entry) {
       return !entry.suiteManaged && !entry.firstParty
-    }).length
-  readonly property int preservedExtraCount: pluginEntries.filter(
-    function(entry) {
-      return entry.compatibility !== "Native" && entry.enabled
     }).length
   readonly property bool pluginRemovalRunning: pluginRemoval.running
   readonly property bool pluginUpdateCheckRunning:
@@ -152,6 +145,8 @@ ShibumiPanel {
   property bool removalPluginWasInBar: false
   property var removalReplacementGroups: []
   property string pluginActionError: ""
+  readonly property string v1PlacementErrorMessage:
+    "The widget could not be added to the V1 layout."
   signal pluginRemovalFinished(
     string pluginId, bool success, string detail)
   signal pluginLayoutTransitionSettled(int serial, string result)
@@ -165,6 +160,11 @@ ShibumiPanel {
       ? bar.shell.serviceFor("hancore.shibumi.control-center") : null)
   readonly property bool nativeCatalogRequired: effectivePluginUpdateService
     && effectivePluginUpdateService.scopedHost === true
+  readonly property string pluginCatalogErrorCode: nativeCatalogRequired
+    && effectivePluginUpdateService.catalogReady !== true
+    && typeof effectivePluginUpdateService.catalogErrorCode === "string"
+    && effectivePluginUpdateService.catalogErrorCode !== "unavailable"
+      ? effectivePluginUpdateService.catalogErrorCode : ""
   readonly property int pluginLayoutTransitionSerial: bar
     && "layoutTransitionSerial" in bar
     ? Number(bar.layoutTransitionSerial || 0) : 0
@@ -287,6 +287,7 @@ ShibumiPanel {
   readonly property int headerHealthErrorCount: settings.healthErrorCount
   readonly property var settingsPageOptions: settings.pageOptions
   readonly property var healthReport: healthService.report
+  readonly property var healthPrimaryChecks: HealthProjection.primaryChecks(healthReport)
   readonly property bool healthRunning: healthService.running
   readonly property bool healthFetching: healthService.fetching
   readonly property string healthFailure: healthService.failure
@@ -472,10 +473,8 @@ ShibumiPanel {
     if (bar) void(bar.layoutConfig)
     void(stateConfig.widgets)
     const registry = pluginRegistry
-    let installed = registry && registry.installedPlugins
-      ? registry.installedPlugins : ({})
+    let installed = ({})
     if (nativeCatalogRequired) {
-      installed = ({})
       const snapshot = pluginCatalogSnapshot
       if (!snapshot || !snapshot.byId || !Object.isFrozen(snapshot.byId))
         return []
@@ -501,7 +500,8 @@ ShibumiPanel {
           __catalogClonedFrom: String(row.clonedFrom || "")
         }
       }
-    }
+    } else installed = registry && registry.installedPlugins
+      ? registry.installedPlugins : ({})
     const result = []
     const ids = Object.keys(installed).sort(function(left, right) {
       const leftName = String(installed[left].name || left).toLowerCase()
@@ -559,10 +559,7 @@ ShibumiPanel {
         const tag = String(declaredTags[tagIndex] || "").trim()
         if (tag !== "" && searchTags.indexOf(tag) < 0) searchTags.push(tag)
       }
-      const placement = manifest.barWidget
-        && ["left", "center", "right"].indexOf(
-          String(manifest.barWidget.defaultSection || "")) >= 0
-        ? String(manifest.barWidget.defaultSection) : "center"
+      const placement = nativeWidgetSection(manifest)
       // A full bar is a mutually exclusive shell host, not a widget/plugin
       // toggle. It must only be changed through a dedicated bar selector.
       if (kinds.indexOf("bar") >= 0) continue
@@ -589,10 +586,12 @@ ShibumiPanel {
           ? widgetInstalled(id)
           : nativeCatalogRequired ? enabled
             : barWidget ? widgetInstalled(id) : enabled,
-        styleAvailable: true,
+        styleAvailable: placement !== "",
         suiteManaged: suiteManaged,
-        userToggleable: barWidget && (!suiteManaged || group !== ""),
+        userToggleable: barWidget && placement !== "" && (!suiteManaged || group !== ""),
         defaultSection: placement,
+        presentationRegion: placement === "tray" ? ""
+          : placement.indexOf("center") === 0 ? "center" : placement,
         compatibility: pluginCompatibility(manifest),
         firstParty: manifest.__isFirstParty === true,
         removable: manifest.__isFirstParty !== true && !suiteManaged,
@@ -743,7 +742,8 @@ ShibumiPanel {
     const id = String(pluginId || "")
     const observation = nativeCatalogRequired ? pluginCatalogObservation : null
     if (nativeCatalogRequired && !observation) {
-      pluginActionError = "The plugin catalog is not ready."
+      pluginActionError = "The plugin catalog is not ready"
+        + (pluginCatalogErrorCode ? " (" + pluginCatalogErrorCode + ")" : "") + "."
       return false
     }
     const manifest = nativeCatalogRequired && observation.snapshot.byId
@@ -768,19 +768,37 @@ ShibumiPanel {
       ? suiteManagedPlugin(id)
       : String(shibumi.suiteId || "") === "hancore.shibumi"
     if (kinds.indexOf("bar-widget") >= 0) {
+      const candidates = bar && typeof bar.conflictingLayoutProviderIds === "function"
+        ? bar.conflictingLayoutProviderIds(id) : [id]
+      if (nativeWidgetSection(manifest) === "tray" || (bar
+          && typeof bar.isDeferredTrayWidget === "function"
+          && candidates.some(candidate => bar.isDeferredTrayWidget(candidate)))) {
+        pluginActionError = ownerWidget.trayDrawerDiagnostic
+        return false
+      }
       const group = shibumiWidgetGroup(id)
       if (group !== "") {
         if (!v2LayoutActive
             && ["G16", "G17", "G18"].indexOf(group) >= 0) {
-          const section = manifest.barWidget
-            && ["left", "center", "right"].indexOf(
-              String(manifest.barWidget.defaultSection || "")) >= 0
-            ? String(manifest.barWidget.defaultSection) : "right"
+          if (bar && ((typeof bar.v1AdditionalWidgetPlaced === "function"
+                && bar.v1AdditionalWidgetPlaced(id))
+              || (enabled !== true
+                && typeof bar.layoutContains === "function"
+                && !bar.layoutContains(id)))) {
+            const v1Group = "G:" + id
+            return groupEnabled(v1Group) === (enabled === true)
+              || setGroupEnabled(v1Group, enabled === true,
+                coalescePresentation === true)
+          }
+          const section = nativeWidgetSection(manifest)
           const changed = setPluginBarWidgetEnabled(
             id, enabled === true, section)
           if (!changed)
             pluginActionError = enabled === true
-              ? "V1 has no free extension slot. Remove an active added plugin or free a V1 extension slot under Bars."
+              ? bar && typeof bar.v1CatalogPlacementFull === "function"
+                  && bar.v1CatalogPlacementFull(id, section)
+                ? "No free place in the V1 bar. Turn off another additional widget first."
+                : panel.v1PlacementErrorMessage
               : "The plugin could not be removed from the V1 layout."
           return changed
         }
@@ -806,14 +824,15 @@ ShibumiPanel {
         pluginActionError = "This suite service cannot be placed in the bar."
         return false
       }
-      const section = manifest.barWidget
-        && ["left", "center", "right"].indexOf(
-          String(manifest.barWidget.defaultSection || "")) >= 0
-        ? String(manifest.barWidget.defaultSection) : "center"
+      const section = nativeWidgetSection(manifest)
       const changed = setPluginBarWidgetEnabled(id, enabled === true, section)
       if (!changed)
         pluginActionError = enabled === true
-          ? "V1 has no free extension slot. Remove an active added plugin or free a V1 extension slot under Bars."
+          ? !v2LayoutActive && bar
+              && typeof bar.v1CatalogPlacementFull === "function"
+              && bar.v1CatalogPlacementFull(id, section)
+            ? "No free place in the V1 bar. Turn off another additional widget first."
+            : "V1 has no free extension slot. Remove an active added plugin or free a V1 extension slot under Bars."
           : "The plugin could not be removed from the active bar."
       return changed
     }
@@ -827,7 +846,19 @@ ShibumiPanel {
       && pluginRegistry.setEnabled(id, enabled === true)
   }
 
+  function nativeWidgetSection(manifest) {
+    const metadata = manifest ? manifest.barWidget : null
+    if (metadata && !Commons.Util.isPlainObject(metadata)) return ""
+    return ownerWidget && typeof ownerWidget.nativeDefaultSection === "function"
+      ? ownerWidget.nativeDefaultSection(metadata ? metadata.defaultSection : undefined) : ""
+  }
+
   function setPluginBarWidgetEnabled(pluginId, enabled, section) {
+    if (!ownerWidget || !Array.isArray(ownerWidget.nativeSections)
+        || ownerWidget.nativeSections.indexOf(section) < 0) {
+      pluginActionError = "The native widget section is unsupported."
+      return false
+    }
     const observation = pluginCatalogObservation
     return runWithControlCenterRestore(function() {
       return bar && typeof bar.setBarWidgetInstalled === "function"
@@ -1068,6 +1099,18 @@ ShibumiPanel {
   function setGroupEnabled(groupId, enabled, coalescePresentation) {
     const group = String(groupId || "")
     const variant = v2LayoutActive ? "v2" : "v1"
+    if (variant === "v1" && enabled === true && bar
+        && typeof bar.v1FixedGroupUnplaced === "function"
+        && bar.v1FixedGroupUnplaced(group)) {
+      const changed = runWithControlCenterRestore(function() {
+        return bar.requestWidgetGroupStateTransition(group, "v1", true)
+      }, true)
+      if (!changed)
+        pluginActionError = bar.v1FixedGroupPlacementFull(group)
+          ? "No free place in the V1 bar. Turn off another additional widget first."
+          : panel.v1PlacementErrorMessage
+      return changed
+    }
     const coalesced = coalescePresentation === true
     const structuralIdle = !bar || (bar.layoutTransitionBusy !== true
       && bar.providerSnapshotTransitionBusy !== true
@@ -1328,8 +1371,8 @@ ShibumiPanel {
     const commands = {
       screensaver: ["omarchy-launch-screensaver", "force"],
       lock: ["omarchy-system-lock"],
-      reboot: ["omarchy-system-reboot"],
-      shutdown: ["omarchy-system-shutdown"]
+      reboot: ["sh", "-c", "if command -v omarchy-system >/dev/null 2>&1; then exec omarchy-system reboot; else exec omarchy-system-reboot; fi"],
+      shutdown: ["sh", "-c", "if command -v omarchy-system >/dev/null 2>&1; then exec omarchy-system shutdown; else exec omarchy-system-shutdown; fi"]
     }
     const requested = String(action || "")
     if (!Object.prototype.hasOwnProperty.call(commands, requested))
@@ -1507,6 +1550,7 @@ ShibumiPanel {
         Text {
           width: parent.width - stateSync.width - closeAction.width
             - parent.spacing * 2
+          elide: Text.ElideRight
           anchors.verticalCenter: parent.verticalCenter
           text: panel.stockOmarchyHost
             ? "SHIBUMI  /  RETURN TO SHIBUMI"
@@ -1538,8 +1582,8 @@ ShibumiPanel {
           id: stateSync
           anchors.verticalCenter: parent.verticalCenter
           stockOmarchyHost: panel.stockOmarchyHost
-          v2LayoutActive: panel.v2LayoutActive
-          stateService: panel.stateService
+          shellStyle: panel.shellStyle
+          barPosition: panel.barPosition
           neutralColor: panel.marketText
           fontFamily: panel.bar
             ? panel.bar.fontFamily : Commons.Style.font.family

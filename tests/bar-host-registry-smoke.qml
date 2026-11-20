@@ -3,9 +3,11 @@ import Quickshell
 import "hancore.shibumi.bar" as BarPlugin
 import "hancore.shibumi.bar/core/LayoutModel.js" as LayoutModel
 import "fixtures" as Fixtures
+import "Commons" as Commons
 
 ShellRoot {
   id: root
+  readonly property bool splitCenter: "centerEnd" in Commons.Util.normalizeLayout({})
 
   property int attempts: 0
   property int stage: 0
@@ -14,6 +16,11 @@ ShellRoot {
   property var retainedItems: []
   property var inlineStateItem: null
   property var inlineStateSlot: null
+  property var legacyRegistrySavedState: null
+  property var legacyRegistrySavedLayout: null
+  property var legacyRegistrySavedShell: null
+  property var legacyRegistrySavedPlugins: null
+  property int legacyRegistryRevisionBefore: -1
   property string commandMarker: testCommandMarker
 
   QtObject {
@@ -188,7 +195,8 @@ ShellRoot {
     try {
       const withCenter = LayoutModel.addSlot(LayoutModel.defaultOrder(), "center")
       const pair = LayoutModel.moveGroupToSlot(withCenter, "G4", "center", 1)
-      const added = LayoutModel.addDynamicGroup(pair, LayoutModel.defaultSplits(), "example.outer", "left")
+      const pairSplits = LayoutModel.resizeSplits(LayoutModel.defaultSplits(), pair)
+      const added = LayoutModel.addDynamicGroup(pair, pairSplits, "example.outer", "left")
       const swapped = LayoutModel.swapGroups(added.order, "G:example.outer", "G8")
       const state = JSON.parse(JSON.stringify(savedState))
       state.presentation.shellStyle = "shibumi"
@@ -200,21 +208,16 @@ ShellRoot {
       const before = JSON.stringify({ state: stateService.config, shell: fakeShell.shellConfig,
         layout: hostBar.layoutConfig, revision: stateService.revision, writes: fakeShell.configWrites,
         enables: fakePluginRegistry.enableCalls })
-      if (!removalChecks.verify("example.outer", false)
-          || hostBar.canRemoveBarWidget("example.outer")
-          || hostBar.removeBarWidgetAndRestoreFamilies("example.outer", [])
-          || JSON.stringify({ state: stateService.config, shell: fakeShell.shellConfig,
-            layout: hostBar.layoutConfig, revision: stateService.revision, writes: fakeShell.configWrites,
-            enables: fakePluginRegistry.enableCalls }) !== before)
-        return root.fail("ambiguous provider removal mutated bar/state/registry")
-      const home = LayoutModel.locationFor(swapped, "G8")
-      if (!hostBar.layoutController.moveGroupToSlot("G:example.outer", home.region, home.index)
+      if (!removalChecks.verify("example.outer", true)
           || !hostBar.canRemoveBarWidget("example.outer")
-          || !removalChecks.verify("example.outer", true)
-          || !hostBar.removeBarWidgetAndRestoreFamilies("example.outer", [])
-          || JSON.stringify(stateService.config.order) !== JSON.stringify(pair)
-          || JSON.stringify(stateService.config.splits) !== JSON.stringify(LayoutModel.defaultSplits()))
-        return root.fail("explicit return-to-extra did not permit safe removal")
+          || !hostBar.removeBarWidgetAndRestoreFamilies("example.outer", []))
+        return root.fail("ambiguous provider removal was refused")
+      hostBar.layoutConfig = JSON.parse(JSON.stringify(fakeShell.shellConfig.bar.layout))
+      if (JSON.stringify(stateService.config.order) !== JSON.stringify(Object.assign({}, swapped, { center: ["", swapped.center[1]] }))
+          || JSON.stringify(stateService.config.splits) !== JSON.stringify(added.splits)
+          || hostBar.layoutConfig.left.some(entry => entry.id === "example.outer") || fakePluginRegistry.enableCalls !== JSON.parse(before).enables
+          || fakeShell.configWrites !== JSON.parse(before).writes + 1 || stateService.revision !== JSON.parse(before).revision + 1)
+        return root.fail("ambiguous provider removal: " + JSON.stringify({ order: stateService.config.order, splits: stateService.config.splits, left: hostBar.layoutConfig.left, enables: fakePluginRegistry.enableCalls - JSON.parse(before).enables, writes: fakeShell.configWrites - JSON.parse(before).writes, revision: stateService.revision - JSON.parse(before).revision }))
     } finally {
       stateService.config = savedState
       fakeShell.shellConfig = savedShell
@@ -744,13 +747,13 @@ ShellRoot {
       root.attempts++
       if ((!hostBar.hostReady || !hostBar.styleReady
            || !hostBar.barToggleStateLoaded
-           || hostBar.moduleSlots.length < 16)
+           || (root.stage < 29 && hostBar.moduleSlots.length < 16))
           && root.attempts < 100) return
 
       if (!hostBar.hostReady || !hostBar.styleReady
           || !hostBar.barToggleStateLoaded)
         return root.fail("bar host did not become ready")
-      if (hostBar.moduleSlots.length !== 16)
+      if (root.stage < 29 && hostBar.moduleSlots.length !== 16)
         return root.fail("expected 16 registry slots, got "
                          + hostBar.moduleSlots.length)
 
@@ -862,6 +865,62 @@ ShellRoot {
         return
       }
 
+      if (root.stage === 29) {
+        if (root.attempts < 3) return
+        if (hostBar.v1FamilySlotBindings.G8 !== "example.family-change"
+            || hostBar.layoutController.groupLocation(
+              "G:example.family-change") !== null)
+          return root.fail("legacy family fixture did not start in the fixed V1 slot")
+        root.legacyRegistryRevisionBefore = hostBar.providerRegistryRevision
+        const changed = JSON.parse(JSON.stringify(
+          fakePluginRegistry.installedPlugins))
+        changed["example.family-change"].barWidget.semanticCapabilities = []
+        fakePluginRegistry.installedPlugins = changed
+        fakePluginRegistry.pluginsChanged()
+        root.stage = 30
+        root.attempts = 0
+        return
+      }
+
+      if (root.stage === 30) {
+        if (root.attempts < 3) return
+        const dynamic = hostBar.layoutController.groupLocation(
+          "G:example.family-change")
+        if (hostBar.providerRegistryRevision
+              !== root.legacyRegistryRevisionBefore + 1
+            || hostBar.v1FamilySlotBindings.G8 !== undefined
+            || !dynamic || dynamic.region !== "right"
+            || JSON.stringify(hostBar.layoutConfig)
+              !== JSON.stringify({ left: [], center: [{
+                id: "example.family-change", shibumiModule: true
+              }], right: [] }))
+          return root.fail("legacy metadata-only family change was not reconciled into persisted V1 order"
+            + " revision=" + hostBar.providerRegistryRevision
+            + "/" + root.legacyRegistryRevisionBefore
+            + " binding=" + JSON.stringify(hostBar.v1FamilySlotBindings)
+            + " dynamic=" + JSON.stringify(dynamic)
+            + " order=" + JSON.stringify(hostBar.layoutController.v1Slots)
+            + " layout=" + JSON.stringify(hostBar.layoutConfig))
+
+        fakePluginRegistry.installedPlugins = root.legacyRegistrySavedPlugins
+        stateService.config = root.legacyRegistrySavedState
+        hostBar.layoutConfig = root.legacyRegistrySavedLayout
+        fakeShell.shellConfig = root.legacyRegistrySavedShell
+        const providerRevision = hostBar.providerRegistryRevision
+        if (!hostBar.prepareForShutdown() || !hostBar.prepareForShutdown()
+            || !hostBar.shutdownPrepared || hostBar.hostReady
+            || hostBar.outputWindowsEnabled)
+          return root.fail("bar shutdown preparation did not settle idempotently")
+        fakePluginRegistry.pluginsChanged()
+        if (hostBar.providerRegistryRevision !== providerRevision)
+          return root.fail("bar shutdown accepted a late registry reconciliation")
+
+        stop()
+        console.log("bar host registry smoke passed; native center:", root.splitCenter ? "centerEnd" : "center")
+        Qt.exit(0)
+        return
+      }
+
       if (root.stage === 13) {
         if (root.attempts < 2) return
         root.inlineStateSlot.ensureResolvedComponent()
@@ -931,6 +990,10 @@ ShellRoot {
         if (hostBar.inlineSettingsDelta(
               hostBar.layoutConfig, nextBarConfig.layout) === null)
           return root.fail("inline settings fixture changed layout structure")
+        const splitCurrent = {left: [], centerBegin: [], center: [], centerEnd: [{id: "example.inline-state", value: 1}], right: [], tray: []}
+        const splitNext = JSON.parse(JSON.stringify(splitCurrent)); splitNext.centerEnd[0].value = 2
+        const splitDelta = hostBar.inlineSettingsDelta(splitCurrent, splitNext)
+        if (!splitDelta || splitDelta.length !== 1 || splitDelta[0].region !== "centerEnd") return root.fail("native centerEnd inline delta was lost")
         const structuralCurrent = {
           left: [], center: [],
           right: [{ id: "example.inline-state", shibumiModule: true }]
@@ -1176,7 +1239,8 @@ ShellRoot {
           || !stateService.groupEnabledForVariant("G8", "v2"))
         return root.fail("rejected provider install did not roll back")
 
-      if (!removalChecks.verifyScopedActive("example.scoped", [])
+      if (!removalChecks.verifyPluginCatalogRegistryIsolation()
+          || !removalChecks.verifyScopedActive("example.scoped", [])
           || !removalChecks.verifyScopedActive(
             "example.scoped-provider", ["G6"])
           || !root.verifyV1FamilyCapacity() || !root.verifyV1RemovalAmbiguity()
@@ -1232,7 +1296,7 @@ ShellRoot {
         return root.fail("Add plugin did not work with the active V2 layout")
       }
       const replacedConfig = fakeShell.shellConfig.bar
-      const centerEntries = replacedConfig.layout.center || []
+      const centerEntries = (l => root.splitCenter ? ((l.center || []).length ? [] : l.centerEnd || []) : l.center || [])(replacedConfig.layout)
       if (!replacedConfig.shibumi
           || !replacedConfig.shibumi.widgets
           || !replacedConfig.shibumi.widgets.G8
@@ -1245,7 +1309,7 @@ ShellRoot {
           + " Shibumi Center in the center region")
       }
       if (!hostBar.removeWidgetFamilyAlternatives("G8")
-          || (fakeShell.shellConfig.bar.layout.center || []).length !== 0) {
+          || (l => (l.center || []).concat(root.splitCenter ? l.centerEnd || [] : []))(fakeShell.shellConfig.bar.layout).length !== 0) {
         return root.fail("Shibumi Center did not remove its alternatives")
       }
 
@@ -1387,9 +1451,8 @@ ShellRoot {
       if (!hostBar.layoutController.moveGroupToSlot(
             "G:example.inline-state", "center", 0))
         return root.fail("V2 generic third-party cross-region move")
-      const movedDynamicV2Group = hostBar.layoutController.groupLocation(
-        "G:example.inline-state")
-      const movedDynamicEntries = fakeShell.shellConfig.bar.layout.center || []
+      const movedDynamicV2Group = hostBar.layoutController.groupLocation("G:example.inline-state")
+      const movedDynamicEntries = (l => root.splitCenter ? ((l.center || []).length ? [] : l.centerEnd || []) : l.center || [])(fakeShell.shellConfig.bar.layout)
       if (!movedDynamicV2Group || movedDynamicV2Group.region !== "center"
           || movedDynamicEntries.length !== 1
           || String(movedDynamicEntries[0].id || "")
@@ -1403,7 +1466,7 @@ ShellRoot {
             "example.inline-state", false, "center")
           || hostBar.layoutController.groupLocation(
             "G:example.inline-state") !== null
-          || (fakeShell.shellConfig.bar.layout.center || []).length !== 0)
+          || (l => (l.center || []).concat(root.splitCenter ? l.centerEnd || [] : []))(fakeShell.shellConfig.bar.layout).length !== 0)
         return root.fail("V2 generic third-party removal")
       hostBar.layoutConfig = JSON.parse(JSON.stringify(
         fakeShell.shellConfig.bar.layout))
@@ -1458,7 +1521,7 @@ ShellRoot {
           || !hostBar.setBarWidgetInstalled(
             "example.future-clock", true, "center"))
         return root.fail("same-capability provider replacement")
-      const complementaryEntries = fakeShell.shellConfig.bar.layout.center
+      const complementaryEntries = (l => root.splitCenter ? ((l.center || []).length === 1 && (l.centerEnd || []).length === 1 ? l.center.concat(l.centerEnd) : []) : l.center)(fakeShell.shellConfig.bar.layout)
       if (complementaryEntries.length !== 2
           || String(complementaryEntries[0].id || complementaryEntries[0])
             !== "omarchy.weather"
@@ -1469,9 +1532,8 @@ ShellRoot {
         fakeShell.shellConfig.bar.layout))
       if (!hostBar.removeBarWidgetAndRestoreFamilies(
             "omarchy.weather", ["G8"])
-          || (fakeShell.shellConfig.bar.layout.center || []).length !== 1
-          || String(fakeShell.shellConfig.bar.layout.center[0].id || "")
-            !== "example.future-clock"
+          || (l => root.splitCenter ? ((l.center || []).length ? [] : l.centerEnd || []) : l.center || [])(fakeShell.shellConfig.bar.layout).length !== 1
+          || String(fakeShell.shellConfig.bar.layout[root.splitCenter ? "centerEnd" : "center"][0].id || "") !== "example.future-clock"
           || stateService.groupEnabledForVariant("G8", "v1")
           || stateService.groupEnabledForVariant("G8", "v2"))
         return root.fail("remaining provider lost family ownership")
@@ -1483,14 +1545,14 @@ ShellRoot {
           }))
         return root.fail("rejected provider restore was reported as success")
       stateService.rejectGroupVariantStates = false
-      if ((fakeShell.shellConfig.bar.layout.center || []).length !== 1
+      if ((l => root.splitCenter ? ((l.center || []).length ? [] : l.centerEnd || []) : l.center || [])(fakeShell.shellConfig.bar.layout).length !== 1
           || stateService.groupEnabledForVariant("G8", "v1")
           || stateService.groupEnabledForVariant("G8", "v2"))
         return root.fail("rejected provider restore did not roll back")
       if (!hostBar.restoreWidgetFamilyProviderStates({
             G8: { v1: true, v2: false }
           })
-          || (fakeShell.shellConfig.bar.layout.center || []).length !== 0
+          || (l => (l.center || []).concat(root.splitCenter ? l.centerEnd || [] : []))(fakeShell.shellConfig.bar.layout).length !== 0
           || !stateService.groupEnabledForVariant("G8", "v1")
           || stateService.groupEnabledForVariant("G8", "v2"))
         return root.fail("exact cross-variant provider restore")
@@ -1695,18 +1757,37 @@ ShellRoot {
       if (!root.verifyTransparencyContract())
         return root.fail("transparency contract did not settle opaque")
 
-      const providerRevision = hostBar.providerRegistryRevision
-      if (!hostBar.prepareForShutdown() || !hostBar.prepareForShutdown()
-          || !hostBar.shutdownPrepared || hostBar.hostReady
-          || hostBar.outputWindowsEnabled)
-        return root.fail("bar shutdown preparation did not settle idempotently")
-      fakePluginRegistry.pluginsChanged()
-      if (hostBar.providerRegistryRevision !== providerRevision)
-        return root.fail("bar shutdown accepted a late registry reconciliation")
-
-      stop()
-      console.log("bar host registry smoke passed")
-      Qt.exit(0)
+      root.legacyRegistrySavedState = JSON.parse(JSON.stringify(
+        stateService.config))
+      root.legacyRegistrySavedLayout = hostBar.currentLayoutSnapshot()
+      root.legacyRegistrySavedShell = JSON.parse(JSON.stringify(
+        fakeShell.shellConfig))
+      root.legacyRegistrySavedPlugins = fakePluginRegistry.installedPlugins
+      const legacyState = JSON.parse(JSON.stringify(stateService.config))
+      legacyState.presentation.shellStyle = "shibumi"
+      legacyState.order = LayoutModel.defaultOrder()
+      legacyState.splits = LayoutModel.defaultSplits()
+      stateService.config = legacyState
+      const familyPlugins = JSON.parse(JSON.stringify(
+        fakePluginRegistry.installedPlugins))
+      familyPlugins["example.family-change"] = {
+        id: "example.family-change",
+        kinds: ["bar-widget"],
+        entryPoints: { barWidget: "Fixture.qml" },
+        barWidget: {
+          allowMultiple: false,
+          semanticCapabilities: ["clock"]
+        }
+      }
+      fakePluginRegistry.installedPlugins = familyPlugins
+      const familyLayout = { left: [], center: [{
+        id: "example.family-change", shibumiModule: true
+      }], right: [] }
+      hostBar.layoutConfig = familyLayout
+      fakeShell.shellConfig.bar.layout = JSON.parse(JSON.stringify(
+        familyLayout))
+      root.stage = 29
+      root.attempts = 0
     }
   }
 }

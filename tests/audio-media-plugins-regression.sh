@@ -4,6 +4,7 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/tests/lib/baselines.sh"
+source "$repo_root/tests/lib/qs-runner.sh"
 shibumi_load_omarchy_baseline
 omarchy_path=$OMARCHY_PATH
 quickshell_bin=${QUICKSHELL_BIN:-/usr/bin/quickshell}
@@ -26,7 +27,7 @@ stage_media_runtime() {
 }
 
 run_smoke() {
-  local name=$1 test_file=$2 marker=$3
+  local name=$1 test_file=$2 marker=$3 deadline=${4:-8} cadence=${5:-0}
   local smoke_root
   smoke_root=$(mktemp -d "$tmpdir/$name.XXXX")
 
@@ -38,6 +39,9 @@ run_smoke() {
   install -Dm0644 "$repo_root/tests/$test_file" "$smoke_root/shell.qml"
 
   stage_media_runtime "$smoke_root"
+  if [[ $test_file == audio-native-backend-seam-regression.qml ]]; then # Fixture readiness only; helpers use private argv.
+    sed -i 's/return Pipewire.ready === true/return true/' "$smoke_root/audio/AudioBackendAdapter.qml"
+  fi
   if [[ $name == audio ]]; then
     cp "$repo_root/tests/fixtures/AudioTestPanel.qml" \
       "$repo_root/tests/fixtures/AudioTestView.qml" \
@@ -48,20 +52,23 @@ run_smoke() {
     cp "$repo_root/tests/fixtures/ShibumiPanelTest.qml" "$smoke_root/media/ShibumiPanel.qml"
   fi
 
-  set +e
-  local output rc
-  output=$(timeout 8 env \
+  local -a qs_fixture_env=(
+    SHIBUMI_MEDIA_QUIESCENCE="$cadence" \
     QT_QPA_PLATFORM=offscreen \
     WAYLAND_DISPLAY= \
     XDG_RUNTIME_DIR="$smoke_root/runtime" \
     QML_IMPORT_PATH="$omarchy_path/shell${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}" \
     QML2_IMPORT_PATH="$omarchy_path/shell${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}" \
-    "$quickshell_bin" -p "$smoke_root" 2>&1)
+  )
+  set +e
+  local output rc
+  output=$(qs_run_fixture "$smoke_root/shell.qml" "$smoke_root" "$deadline" 2>&1)
   rc=$?
   set -e
 
   printf '%s\n' "$output"
   [[ $rc -eq 0 ]] || fail "$name smoke exited $rc"
+  if grep -Fq 'TypeError:' <<<"$output"; then fail "$name runtime TypeError"; fi
   grep -F "$marker" <<<"$output" >/dev/null \
     || fail "$name success marker missing"
 }
@@ -71,6 +78,7 @@ run_smoke audio audio-native-backend-seam-regression.qml \
   'audio native backend seam regression passed'
 run_smoke audio audio-runtime-smoke.qml 'audio runtime smoke passed'
 run_smoke media media-plugin-smoke.qml 'media plugin smoke passed'
+run_smoke media media-plugin-smoke.qml 'media quiescence smoke passed' 40 1
 
 run_spectrum_smoke() {
   local mode=$1 marker=$2
@@ -92,9 +100,7 @@ run_spectrum_smoke() {
       "$smoke_root/bin/cava"
   fi
 
-  set +e
-  local output rc
-  output=$(timeout 12 env \
+  local -a qs_fixture_env=(
     PATH="$smoke_root/bin:/usr/bin:/bin" \
     SHIBUMI_CAVA_TEST_MODE="$mode" \
     QT_QPA_PLATFORM=offscreen \
@@ -102,7 +108,10 @@ run_spectrum_smoke() {
     XDG_RUNTIME_DIR="$smoke_root/runtime" \
     QML_IMPORT_PATH="$omarchy_path/shell${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}" \
     QML2_IMPORT_PATH="$omarchy_path/shell${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}" \
-    "$quickshell_bin" -p "$smoke_root" 2>&1)
+  )
+  set +e
+  local output rc
+  output=$(qs_run_fixture "$smoke_root/shell.qml" "$smoke_root" 12 2>&1)
   rc=$?
   set -e
 
@@ -140,11 +149,11 @@ grep -Fq 'horizontalAlignment: Text.AlignLeft' <<<"$compact_content" \
 if grep -Fq 'horizontalAlignment: Text.AlignRight' <<<"$compact_content"; then
   fail "compact audio value still shifts inside its fixed-width field"
 fi
-rg -q 'registeredWidgetSource' "$audio_widget" \
+rg -q 'registeredWidgetSource' "$repo_root/hancore.shibumi.audio/HostWidgetEmbed.qml" \
   || fail "audio bridge does not resolve the official Omarchy source"
-rg -q 'registeredWidgetComponent' "$audio_widget" \
+rg -q 'registeredWidgetComponent' "$repo_root/hancore.shibumi.audio/HostWidgetEmbed.qml" \
   || fail "audio bridge does not resolve the official Omarchy component"
-rg -q 'registered(Source|Component)\("omarchy\.audio"\)' "$audio_widget" \
+rg -q 'embed\.resolveSource\("omarchy\.audio"\)' "$audio_widget" \
   || fail "audio bridge does not select the official Omarchy audio plugin"
 rg -q 'readonly property color background: realBar && realBar\.background !== undefined' \
   "$audio_bridge" \

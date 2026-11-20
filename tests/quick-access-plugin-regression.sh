@@ -4,6 +4,8 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/tests/lib/baselines.sh"
+source "$repo_root/tests/lib/qs-runner.sh"
+source "$repo_root/tests/lib/host-diagnostics.sh"
 shibumi_load_omarchy_baseline
 omarchy_path=$OMARCHY_PATH
 quickshell_bin=${QUICKSHELL_BIN:-/usr/bin/quickshell}
@@ -45,8 +47,10 @@ EOF
   cp -a -- "$repo_root/hancore.shibumi.quick-access" \
     "$fixture_root/quickaccess"
   cp -a -- "$omarchy_path/shell/Commons" "$fixture_root/Commons"
+  cp -a -- "$omarchy_path/shell/Ui" "$fixture_root/Ui"
   install -m 0644 "$repo_root/hancore.shibumi.bar/core/WidgetSlot.qml" \
     "$fixture_root/barcore/WidgetSlot.qml"
+  cp "$repo_root/hancore.shibumi.bar/core/GroupRegistry.js" "$fixture_root/barcore/"
   # The fixture exercises the production overlay body without creating a real
   # layer surface. Only the window-shell-only properties are removed.
   python3 -I -S - "$fixture_root/quickaccess/PickerOverlay.qml" <<'PY'
@@ -97,6 +101,13 @@ for index in range(100):
         path.write_bytes(image)
         path.chmod(0o644)
 PY
+  printf '%s\n' \
+    'accent = "#89b4fa"' 'selection = "#45475a"' 'muted = "#585b70"' \
+    'background = "#1e1e2e"' 'dark_background = "#161622"' 'darker_background = "#101019"' \
+    'foreground = "#cdd6f4"' 'cursor = "#f5e0dc"' \
+    'red = "#f38ba8"' 'green = "#a6e3a1"' 'yellow = "#f9e2af"' \
+    'blue = "#89b4fa"' 'magenta = "#f5c2e7"' 'cyan = "#94e2d5"' \
+    >"$fixture_root/images/colors.toml"
   install -m 0644 "$repo_root/tests/quick-access-plugin-smoke.qml" \
     "$fixture_root/shell.qml"
 }
@@ -104,8 +115,7 @@ PY
 run_smoke() {
   local fixture_root=$1
   : >"$fixture_root/notify.log"
-  set +e
-  RUN_OUTPUT=$(timeout 8 env \
+  local -a qs_fixture_env=(
     HOME="$fixture_root/home" \
     XDG_CONFIG_HOME="$fixture_root/config" \
     XDG_STATE_HOME="$fixture_root/state" \
@@ -119,12 +129,16 @@ run_smoke() {
     XDG_RUNTIME_DIR="$fixture_root/runtime" \
     QML_IMPORT_PATH="$omarchy_path/shell${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}" \
     QML2_IMPORT_PATH="$omarchy_path/shell${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}" \
-    "$quickshell_bin" -p "$fixture_root" 2>&1)
+  )
+  set +e
+  RUN_OUTPUT=$(qs_run_fixture "$fixture_root/shell.qml" "$fixture_root" 8 2>&1)
   RUN_RC=$?
   set -e
   RUN_PLAIN_OUTPUT=$(sed $'s/\033\\[[0-9;]*m//g' <<<"$RUN_OUTPUT")
   RUN_WARNINGS=$(sed -n -E \
-    's/^[[:space:]]*WARN([^:]*)?:[[:space:]]*//p' <<<"$RUN_PLAIN_OUTPUT")
+    's/^[[:space:]]*WARN([^:]*)?:[[:space:]]*//p' <<<"$RUN_PLAIN_OUTPUT" \
+    | host_filter_startup_diagnostics -x \
+      -e 'Unable to find hyprland socket. Cannot connect to hyprland.' || true)
 }
 
 validate_common_completion() {
@@ -259,7 +273,7 @@ for command in omarchy-theme-switcher omarchy-theme-bg-switcher; do
   rg -Fq "\"$command\"" "$service" \
     || fail "official Omarchy image picker adapter is missing: $command"
 done
-rg -Fq '["omarchy-shell", "image-selector", "cancel"]' "$service" \
+rg -Fq '[SuiteRuntime.HostContract.shellCommand, "image-selector", "cancel"]' "$service" \
   || fail "official Omarchy image picker cannot be cancelled"
 rg -q 'usingOfficialPicker' "$service" \
   || fail "official image picker is not isolated from the Shibumi overlay"

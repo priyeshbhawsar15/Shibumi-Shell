@@ -13,6 +13,16 @@ PanelWindow {
     && screen.name !== ""
     && screen.width > 0
     && screen.height > 0
+  // Let top shadows fade beyond barSize without enlarging layout or input:
+  // V1 uses 8px blur + 1px offset; Full/Fit use 9px + 2px independently
+  // of the V1 shadow toggle. Notch only needs its 1px antialiasing fringe.
+  readonly property int shadowPadding: !bar.vertical && bar.position === "top"
+    && bar.visualTokens
+      ? bar.visualTokens.shellStyle === "shibumi"
+        ? bar.visualTokens.shadowEnabled === true ? 9 : 0
+        : ["full", "fit"].indexOf(bar.visualTokens.shellStyle) >= 0 ? 11
+          : bar.visualTokens.shellStyle === "notch" ? 1 : 0
+      : 0
   readonly property var layoutSession: dragSession
   readonly property real surfaceWidth: barSurfaceLoader.item
     ? Number(barSurfaceLoader.item.width) || 0 : 0
@@ -56,12 +66,15 @@ PanelWindow {
 
   visible: bar.hostReady && bar.styleReady && validScreen && !bar.barHidden
     && windowRecovery.recoveryVisible
-  // Match the original V1 input model: keep one stable screen-sized surface
-  // and change only its input region. This avoids compositor resize flashes
-  // while allowing bar drag, Escape, and outside-click dismissal to share one
-  // focus owner during editing.
-  implicitWidth: bar.vertical && validScreen ? screen.width : 0
-  implicitHeight: !bar.vertical && validScreen ? screen.height : 0
+  // Keep the anchor window edge-local in every presentation and while editing.
+  // The reserved desktop area remains the independent exclusiveZone below.
+  implicitWidth: bar.vertical && validScreen ? bar.barSize : 0
+  // Personal fork: the expanded now-playing notch draws below the bar, so a
+  // horizontal window is tall enough for it at all times (no resize flash on
+  // expand). The mask below keeps the transparent remainder click-through.
+  readonly property int notchExpandedHeight: 380
+  implicitHeight: !bar.vertical && validScreen
+    ? Math.max(bar.barSize + shadowPadding, notchExpandedHeight) : 0
   color: "transparent"
   surfaceFormat.opaque: false
 
@@ -78,18 +91,18 @@ PanelWindow {
   WlrLayershell.keyboardFocus: dragSession.editing
     ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
 
+  // Personal fork: input covers only the bar strip (the 8px reveal strip while
+  // auto-hidden, the expanded notch while open). Edit mode keeps the bar strip;
+  // upstream's separate backdrop window owns outside-click dismissal.
   mask: Region {
-    x: dragSession.editing ? 0
-      : barWindow.bar.vertical && barWindow.bar.position === "right"
-        ? Math.max(0, barWindow.width - barWindow.bar.barSize) : 0
-    y: dragSession.editing ? 0
-      : !barWindow.bar.vertical && barWindow.bar.position === "bottom"
-        ? Math.max(0, barWindow.height - barWindow.bar.barSize) : 0
-    width: dragSession.editing || !barWindow.bar.vertical
-      ? barWindow.width : barWindow.bar.barSize
-    height: dragSession.editing || barWindow.bar.vertical
+    x: barWindow.bar.vertical && barWindow.bar.position === "right"
+      ? Math.max(0, barWindow.width - barWindow.bar.barSize) : 0
+    y: !barWindow.bar.vertical && barWindow.bar.position === "bottom"
+      ? Math.max(0, barWindow.height - barWindow.bar.barSize) : 0
+    width: !barWindow.bar.vertical ? barWindow.width : barWindow.bar.barSize
+    height: barWindow.bar.vertical
       ? barWindow.height
-      : (barWindow.nowPlayingExpanded ? 380 : (barWindow.autohideActive && !barWindow.autohideRevealed ? 8 : barWindow.bar.barSize))
+      : (barWindow.nowPlayingExpanded ? barWindow.notchExpandedHeight : (barWindow.autohideActive && !barWindow.autohideRevealed ? 8 : barWindow.bar.barSize))
   }
 
   WindowRecovery {
@@ -105,6 +118,20 @@ PanelWindow {
     id: dragSession
     layoutController: barWindow.bar.layoutController
     screenName: barWindow.screen ? String(barWindow.screen.name || "") : ""
+    originX: barWindow.bar.vertical && barWindow.bar.position === "right"
+      && barWindow.validScreen
+        ? Math.max(0, barWindow.screen.width - barWindow.bar.barSize) : 0
+    originY: !barWindow.bar.vertical && barWindow.bar.position === "bottom"
+      && barWindow.validScreen
+        ? Math.max(0, barWindow.screen.height - barWindow.bar.barSize) : 0
+    geometryKey: JSON.stringify([
+      barWindow.screen ? String(barWindow.screen.name || "") : "",
+      barWindow.screen ? Number(barWindow.screen.width) || 0 : 0,
+      barWindow.screen ? Number(barWindow.screen.height) || 0 : 0,
+      barWindow.screen ? Number(barWindow.screen.devicePixelRatio) || 1 : 1,
+      String(barWindow.bar.position || ""),
+      Number(barWindow.bar.barSize) || 0
+    ])
   }
 
   Component.onCompleted: bar.registerLayoutSession(dragSession)
@@ -153,25 +180,38 @@ PanelWindow {
     onExited: barWindow.requestHide()
   }
 
+  Loader {
+    id: editBackdropLoader
+
+    active: dragSession.editing
+      && barWindow.visible && barWindow.backingWindowVisible
+      && barWindow.bar.hostReady && barWindow.bar.styleReady
+      && barWindow.validScreen && !barWindow.bar.barHidden
+      && windowRecovery.recoveryVisible
+    sourceComponent: Component {
+      EditBackdropPanel {
+        bar: barWindow.bar
+        layoutSession: dragSession
+        targetScreen: barWindow.screen
+        barVisible: barWindow.visible && barWindow.backingWindowVisible
+          && windowRecovery.recoveryVisible
+      }
+    }
+  }
+
   Rectangle {
-    anchors.fill: parent
+    anchors.fill: barSurfaceLoader
     visible: dragSession.editing
     color: Commons.Color.background
     opacity: 0.34
     z: 1
-
-    MouseArea {
-      anchors.fill: parent
-      acceptedButtons: Qt.LeftButton
-      onClicked: dragSession.setEditing(false)
-    }
   }
 
   Loader {
     id: barSurfaceLoader
 
     width: barWindow.bar.vertical ? barWindow.bar.barSize : parent.width
-    height: barWindow.bar.vertical ? parent.height : (barWindow.nowPlayingExpanded ? 380 : barWindow.bar.barSize)
+    height: barWindow.bar.vertical ? parent.height : (barWindow.nowPlayingExpanded ? barWindow.notchExpandedHeight : barWindow.bar.barSize)
     x: barWindow.bar.vertical && barWindow.bar.position === "right"
       ? Math.max(0, parent.width - width) : 0
     y: !barWindow.bar.vertical && barWindow.bar.position === "bottom"

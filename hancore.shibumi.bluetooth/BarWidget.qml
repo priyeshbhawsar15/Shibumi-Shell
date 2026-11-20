@@ -22,7 +22,9 @@ Ui.Panel {
     ? tokens.widgetContentColor(settings,
       bar ? bar.urgent : Commons.Color.accent)
     : (bar ? bar.urgent : Commons.Color.accent)
-  readonly property string displayMode: String(
+  readonly property bool iconOnly: tokens.v2Shell !== true
+    && setting("displayMode", "full") === "icon-only"
+  readonly property string displayMode: iconOnly ? "icon" : String(
     setting("displayMode", setting("compact", false) ? "icon" : "full"))
   readonly property bool compact: displayMode === "icon"
   readonly property int iconSlotSize: tokens.v2Shell === true
@@ -40,7 +42,7 @@ Ui.Panel {
   readonly property int connectedCount: bluetoothReady
     ? bluetoothService.connectedCount : 0
   readonly property bool connected: connectedCount > 0
-  readonly property bool showConnectedCount: connected
+  readonly property bool showConnectedCount: !iconOnly && connected
     && bar && !bar.vertical
   readonly property string stateIcon: !radioEnabled ? "\uE1A9"
     : connected ? "\uE1A8" : "\uE1A7"
@@ -165,10 +167,13 @@ Ui.Panel {
   Component {
     id: fullContent
 
-    Row {
+    Presentation.InkRow {
+      optical: !root.bar || !root.bar.vertical
+      opticalBias: root.contentHorizontalOffset
       spacing: root.tokens.contentGap
 
-      Text {
+      Presentation.IconText {
+        barText: true
         visible: root.displayMode === "full"
         anchors.verticalCenter: parent.verticalCenter
         text: "BT"
@@ -185,8 +190,12 @@ Ui.Panel {
         anchors.verticalCenter: parent.verticalCenter
         width: root.iconSlotSize
         height: root.iconSlotSize
+        readonly property real inkLeft: bluetoothGlyph.x + bluetoothGlyph.inkLeft
+        readonly property real inkRight: bluetoothGlyph.x + bluetoothGlyph.inkRight
 
-        Presentation.IconText {
+        Presentation.BarGlyph {
+          id: bluetoothGlyph
+          optical: !root.bar || !root.bar.vertical
           anchors.centerIn: parent
           text: root.stateIcon
           color: root.widgetInk
@@ -197,7 +206,8 @@ Ui.Panel {
         }
       }
 
-      Text {
+      Presentation.IconText {
+        barText: true
         anchors.verticalCenter: parent.verticalCenter
         visible: root.showConnectedCount
         text: String(root.connectedCount)
@@ -212,7 +222,9 @@ Ui.Panel {
   Component {
     id: compactContent
 
-    Row {
+    Presentation.InkRow {
+      optical: !root.bar || !root.bar.vertical
+      opticalBias: root.contentHorizontalOffset
       spacing: root.tokens.compactGap
 
       Item {
@@ -220,8 +232,12 @@ Ui.Panel {
         anchors.verticalCenter: parent.verticalCenter
         width: root.iconSlotSize
         height: root.iconSlotSize
+        readonly property real inkLeft: bluetoothGlyph.x + bluetoothGlyph.inkLeft
+        readonly property real inkRight: bluetoothGlyph.x + bluetoothGlyph.inkRight
 
-        Presentation.IconText {
+        Presentation.BarGlyph {
+          id: bluetoothGlyph
+          optical: !root.bar || !root.bar.vertical
           anchors.centerIn: parent
           text: root.stateIcon
           color: root.widgetInk
@@ -232,7 +248,8 @@ Ui.Panel {
         }
       }
 
-      Text {
+      Presentation.IconText {
+        barText: true
         anchors.verticalCenter: parent.verticalCenter
         visible: root.showConnectedCount
         text: String(root.connectedCount)
@@ -247,7 +264,8 @@ Ui.Panel {
   Component {
     id: textContent
 
-    Text {
+    Presentation.IconText {
+      barText: true
       text: root.connected ? String(root.connectedCount)
         : root.radioEnabled ? "On" : "Off"
       color: root.widgetInk

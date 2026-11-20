@@ -14,6 +14,7 @@ Item {
   required property string groupId
   property string screenName: ""
   property real availableWidth: 0
+  property bool layoutBusy: false
   readonly property var stateService: bar && bar.shell
     && typeof bar.shell.serviceFor === "function"
     ? bar.shell.serviceFor("hancore.shibumi.state") : null
@@ -125,6 +126,10 @@ Item {
   // that same selection and can oscillate for width-reactive providers.
   readonly property bool hasLoadedWidgets: contentItem
     ? contentItem.hasLoadedWidgets === true : false
+  readonly property bool savingsPending: contentItem && "savingsPending" in contentItem
+    ? contentItem.savingsPending : false
+  readonly property real spacingRecovery: contentItem && "spacingRecovery" in contentItem
+    ? contentItem.spacingRecovery : 0
   readonly property bool hasContent: implicitWidth > 0.5 && implicitHeight > 0.5
   readonly property real minimumResponsiveWidth: contentItem
     && "minimumResponsiveWidth" in contentItem
@@ -228,6 +233,25 @@ Item {
       readonly property bool hasLoadedWidgets: root
         ? root.anyLoadedWidget(moduleRepeater) : false
 
+      readonly property bool savingsPending: {
+        void(moduleRow.children)
+        for (let i = 0; i < moduleRepeater.count; i++) {
+          const slot = moduleRepeater.itemAt(i)
+          const item = slot && slot.activeItemVisible ? slot.activeItem : null
+          if (item && "savingsPending" in item && item.savingsPending) return true
+        }
+        return false
+      }
+      readonly property real spacingRecovery: {
+        void(moduleRow.implicitWidth)
+        let total = 0
+        for (let i = 0; i < moduleRepeater.count; i++) {
+          const slot = moduleRepeater.itemAt(i)
+          const item = slot && slot.activeItemVisible ? slot.activeItem : null
+          if (item && "spacingSavings" in item) total += item.spacingSavings
+        }
+        return total
+      }
       readonly property real minimumResponsiveWidth: {
         void(moduleRow.implicitWidth)
         var total = 0
@@ -276,6 +300,7 @@ Item {
             availableWidth: root.availableWidth > 0
               ? Math.max(1, root.availableWidth - horizontalRoot.siblingWidth(index)) : 0
             horizontalHostHeight: root.v2Shell ? 0 : root.v1SlotHeight
+            layoutBusy: root.layoutBusy
           }
         }
       }
@@ -324,6 +349,7 @@ Item {
             screenName: root.screenName
             availableWidth: root.availableWidth
             horizontalHostHeight: 0
+            layoutBusy: root.layoutBusy
           }
         }
       }

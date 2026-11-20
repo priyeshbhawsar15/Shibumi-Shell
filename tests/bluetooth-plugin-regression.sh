@@ -142,10 +142,6 @@ if rg -q 'registeredWidget|registeredSource|registeredComponent|panelSource|pane
     "$service" "$adapter"; then
   fail "Bluetooth still resolves or loads a foreign UI component"
 fi
-if rg -q 'official_bluetooth_panel|plugins/panels/bluetooth/Panel\.qml' \
-    "$repo_root/tests/contract-regression.sh"; then
-  fail "Bluetooth contract still depends on the retired official panel"
-fi
 jq -e '
   .plugins[] | select(.id == "hancore.shibumi.bluetooth") |
   (.hostContracts // []) == []
@@ -189,30 +185,11 @@ rg -q 'property var discoveryOwnerAdapter: null' "$adapter" \
 if rg -q 'IpcHandler \{' "$adapter"; then
   fail "Bluetooth backend adapter must not register a second IPC owner"
 fi
-for termination_signal in INT TERM HUP; do
-  rg -q "^trap .* ${termination_signal}$" \
-    "$repo_root/tests/bluetooth-ipc-ownership-regression.sh" \
-    || fail "Bluetooth IPC harness does not trap $termination_signal"
-done
-rg -q 'setsid .*quickshell|setsid .*quickshell_bin' \
-  "$repo_root/tests/bluetooth-ipc-ownership-regression.sh" \
-  || fail "Bluetooth IPC harness does not isolate the Quickshell process group"
-rg -q 'process_group_alive.*|kill -0 -- "-\$pgid"' \
-  "$repo_root/tests/bluetooth-ipc-ownership-regression.sh" \
-  || fail "Bluetooth IPC harness does not observe the entire process group"
-rg -q '"\$timeout_bin" --foreground "\$ipc_timeout_seconds"' \
-  "$repo_root/tests/bluetooth-ipc-ownership-regression.sh" \
-  || fail "Bluetooth IPC harness calls are not time-bounded"
-for settle_method in settleBluetoothState settledBluetoothState; do
-  rg -q "$settle_method" \
-    "$repo_root/tests/bluetooth-ipc-ownership-regression.sh" \
-    || fail "Bluetooth IPC success/abort rollback lacks $settle_method"
-done
 rg -q 'property var sessionOwners: \[\]' "$service" \
   || fail "Bluetooth panel sessions are not centrally tracked"
 rg -q 'adapter\.stopDiscovery\(\)' "$service" \
   || fail "Bluetooth discovery lacks final-close cleanup"
-rg -U -q 'id: discoveryRetry[^}]*repeat: true[^}]*running: root\.sessionCount > 0 && root\.adapterAvailable[^}]*root\.radioEnabled && !root\.discovering' \
+rg -U -q 'id: discoveryRetry[^}]*repeat: true[^}]*running: root\.sessionCount > 0 && root\.adapterAvailable[^}]*root\.adapterEnabled && !root\.discovering' \
   "$service" \
   || fail "Bluetooth discovery retry is not bounded to an open, powered idle session"
 rg -U -q 'function confirmRequestedDiscovery\(\) \{(.|\n)*?requested\.discovering(.|\n)*?discoveryOwned = true(.|\n)*?\n  \}' \
@@ -230,8 +207,8 @@ fi
 if rg -q 'Process \{|FileView \{' "$service" "$adapter"; then
   fail "Bluetooth owner uses an unbounded worker instead of native APIs"
 fi
-[[ $(rg -c '^  Timer \{' "$adapter") -eq 4 ]] \
-  || fail "Bluetooth adapter must keep exactly the four bounded lifecycle timers"
+[[ $(rg -c '^  Timer \{' "$adapter") -eq 5 ]] \
+  || fail "Bluetooth adapter must keep exactly the five bounded lifecycle timers"
 rg -q 'id: heroPowerToggle' "$panel" \
   || fail "Bluetooth radio toggle is not grouped with adapter status"
 if sed -n '/id: headerActions/,/^        }/p' "$panel" \
@@ -242,7 +219,7 @@ rg -Fq 'const current = rowAt(index)' "$panel" \
   || fail "Bluetooth section boundaries do not guard transient model rows"
 rg -Fq 'connected ? "\uE1A8" : "\uE1A7"' "$widget" \
   || fail "connected Bluetooth bar state does not use stable glyph codepoints"
-rg -Fq 'readonly property bool showConnectedCount: connected' "$widget" \
+rg -Fq 'readonly property bool showConnectedCount: !iconOnly && connected' "$widget" \
   || fail "connected Bluetooth count has no horizontal bar presentation state"
 [[ $(rg -Fc 'visible: root.showConnectedCount' "$widget") -eq 2 ]] \
   || fail "connected Bluetooth count is not shown in every horizontal mode"

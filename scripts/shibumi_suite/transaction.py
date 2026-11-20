@@ -21,7 +21,7 @@ from .admission import (
     supported_install_identities,
     verify_transaction_artifact_bindings,
 )
-from .config import atomic_write, parse_config_bytes, read_config
+from .config import atomic_write, native_sections, parse_config_bytes, read_config
 from .model import (
     ContractError,
     PluginSpec,
@@ -293,6 +293,24 @@ def _open_config_parent(path: Path, *, create: bool) -> int:
     except Exception:
         os.close(descriptor)
         raise
+
+
+def _boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+
+def _journal_predates_boot(journal: dict[str, Any], path: Path) -> bool:
+    try:
+        if "bootId" in journal:
+            boot = journal["bootId"]
+            return (isinstance(boot, str) and str(uuid.UUID(boot)) == boot
+                    and boot != _boot_id())
+        boot_time = next(
+            int(line.split()[1]) for line in Path("/proc/stat").read_text().splitlines()
+            if line.startswith("btime "))
+        return path.stat(follow_symlinks=False).st_mtime < boot_time
+    except (OSError, ValueError, StopIteration):
+        return False
 
 
 def _open_verified_config_parent(
@@ -712,10 +730,8 @@ def _config_payload_enables_plugin(payload: bytes | None, plugin_id: str) -> boo
         return False
     return any(
         entry_id(entry) == plugin_id
-        for section in ("left", "center", "right")
-        for entry in (
-            layout.get(section) if isinstance(layout.get(section), list) else []
-        )
+        for section in native_sections(layout)
+        for entry in layout.get(section, [])
     )
 
 
@@ -817,6 +833,7 @@ class PluginTransaction:
             "phase": phase,
             "pluginRoot": str(self.paths.plugin_dir.resolve(strict=False)),
             "configPath": str(self._config_path),
+            "bootId": _boot_id(),
             "configParentIdentity": {
                 "device": self._config_parent_identity.st_dev,
                 "inode": self._config_parent_identity.st_ino,
@@ -1730,6 +1747,17 @@ def _archive_transaction_backups_open(
     if paths.plugin_dir.is_dir():
         _fsync_directory(paths.plugin_dir)
 
+    # A first install has replacement records but no preceding payloads.
+    # Retire its empty slot before it can displace a real retained backup.
+    if not any(destination.iterdir()):
+        slot = backup_root / logical_destination.name
+        opened = destination.stat()
+        current = slot.lstat()
+        if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+            raise TransactionError("empty transaction archive directory was replaced")
+        slot.rmdir()
+        _fsync_directory(backup_root)
+
     if backup_root.is_dir():
         retained = sorted(
             (path for path in backup_root.iterdir() if path.is_dir()),
@@ -2198,6 +2226,15 @@ def recover_transactions(
             verify_transaction_artifact_bindings(
                 artifact_bindings, artifact_identities
             )
+
+        if _journal_predates_boot(journal, directory / "journal.json"):
+            descriptor = _open_config_parent(config_path.parent, create=False)
+            try:
+                current = os.fstat(descriptor)
+                if current.st_ino == config_parent_inode:
+                    config_parent_device = current.st_dev
+            finally:
+                os.close(descriptor)
 
         if phase in COMMIT_PHASES:
             if "desiredState" not in journal:

@@ -13,8 +13,11 @@ Ui.Panel {
   moduleName: "hancore.shibumi.center"
   manageIpc: false
   Presentation.HostTokens { id: hostTokens; bar: root.bar }
+  HostWidgetEmbed { id: embed; bar: root.bar }
   property url calendarSource: Qt.resolvedUrl("CalendarPanel.qml")
   property real availableWidth: 0
+  property var responsiveWidthProvider: null
+  property bool layoutBusy: false
   // Start conservatively when the widget is recreated after a provider
   // switch. Starting at the widest stage can make the outer bar hide G9/G10
   // before this widget receives its real center budget, creating a coupled
@@ -34,6 +37,8 @@ Ui.Panel {
     && tokens.widgetHasFill(settings))
   readonly property string displayMode: String(
     setting("displayMode", setting("compact", false) ? "icon" : "full"))
+  readonly property bool iconOnly: tokens.v2Shell !== true
+    && displayMode === "icon-only"
   readonly property bool compact: displayMode === "icon"
   property var centerService: bar && bar.shell
     && typeof bar.shell.serviceFor === "function"
@@ -59,6 +64,7 @@ Ui.Panel {
   readonly property real centerPadding: tokens ? tokens.pillPaddingX : 9
   readonly property real centerSpacing: Commons.Style.space(8)
   readonly property real needMinimal: 2 * centerPadding + clockWidget.implicitWidth
+    + (iconOnly ? centerSpacing + scheduleGlyph.implicitWidth : 0)
     + (showIndicators ? centerSpacing + statusNaturalWidth : 0)
   readonly property real minimumResponsiveWidth: needMinimal
   readonly property real needCompact: needMinimal
@@ -76,9 +82,9 @@ Ui.Panel {
   readonly property var weatherSettings: childSettings("omarchy.weather")
   readonly property var clockSettings: childSettings("omarchy.clock")
   readonly property var updateSettings: childSettings("omarchy.system-update")
-  readonly property url updateSource: registeredSource("omarchy.system-update")
-  property Component updateComponent: String(updateSource) ? null
-    : registeredComponent("omarchy.system-update")
+  readonly property url updateSource: embed.resolveSource("omarchy.system-update")
+  property var updateComponent: String(updateSource) ? null
+    : embed.resolveComponent("hancore.shibumi.center", "omarchy.system-update")
 
   implicitWidth: bar && bar.vertical ? bar.barSize
     : Math.round(centerRow.implicitWidth) + 2 * centerPadding
@@ -91,44 +97,10 @@ Ui.Panel {
       ? settings[id] : ({})
   }
 
-  function registeredComponent(id) {
-    if (bar && typeof bar.registeredWidgetComponent === "function")
-      return bar.registeredWidgetComponent(id)
-    const registry = bar ? bar.barWidgetRegistry : null
-    if (registry) void(registry.revision)
-    const widgets = registry && registry.widgets ? registry.widgets : ({})
-    const entry = widgets[id]
-    return entry ? entry.component : null
-  }
-
-  function registeredSource(id) {
-    if (bar && typeof bar.registeredWidgetSource === "function")
-      return bar.registeredWidgetSource(id)
-    const registry = bar && bar.shell
-      && "pluginRegistry" in bar.shell ? bar.shell.pluginRegistry : null
-    const pluginManifest = registry && registry.installedPlugins
-      ? registry.installedPlugins[String(id || "")] : null
-    return registry && typeof registry.entryPointUrl === "function"
-      ? registry.entryPointUrl(pluginManifest, "barWidget") : ""
-  }
-
-  function syncOfficialLoader(loader, component, source, id, childSettingsValue) {
-    loader.sourceComponent = null
-    loader.source = ""
-    if (component !== null) {
-      loader.sourceComponent = component
-    } else if (String(source)) {
-      loader.setSource(source, {
-        bar: root.bar,
-        moduleName: id,
-        settings: childSettingsValue
-      })
-    }
-  }
-
   function syncUpdateLoader() {
-    syncOfficialLoader(updateLoader, updateComponent, updateSource,
-      "omarchy.system-update", updateSettings)
+    embed.syncLoader(updateLoader, updateComponent, updateSource, {
+      bar: root.bar, moduleName: "omarchy.system-update", settings: updateSettings
+    }, root.bar)
   }
 
   function injectChild(item, id, childSettingsValue) {
@@ -143,7 +115,7 @@ Ui.Panel {
   }
 
   function scheduleOfficialSync() {
-    officialSyncTimer.restart()
+    if (root && !embed.shuttingDown) officialSyncTimer.restart()
   }
 
   function childPanelWidget(pluginId) {
@@ -154,6 +126,14 @@ Ui.Panel {
   }
 
   function updateStage() {
+    // Defer while reservations or pending savings make layout provisional;
+    // never replace the legacy decision value or its animation history.
+    if ((typeof responsiveWidthProvider === "function"
+        && responsiveWidthProvider() < availableWidth - 0.000001)
+        || layoutBusy) {
+      restageTimer.restart()
+      return
+    }
     stage = CenterLayout.nextStage(stage, availableWidth,
       needNormal, needCompact, centered)
   }
@@ -182,6 +162,10 @@ Ui.Panel {
   Component.onCompleted: {
     restageTimer.restart()
     scheduleOfficialSync()
+  }
+  Component.onDestruction: {
+    officialSyncTimer.stop()
+    embed.shutdown()
   }
 
   Timer {
@@ -249,8 +233,9 @@ Ui.Panel {
       contentColor: root.widgetInk
     }
 
-    Presentation.IconText {
-      visible: root.displayMode === "icon"
+    Presentation.BarGlyph {
+      id: scheduleGlyph
+      visible: root.displayMode === "icon" || root.iconOnly
       anchors.verticalCenter: parent.verticalCenter
       text: "schedule"
       color: root.widgetInk
@@ -279,6 +264,7 @@ Ui.Panel {
         anchors.centerIn: parent
         bar: root.bar
         text: root.dateText
+        labelVisible: root.bar && root.bar.vertical
         fontFamily: root.bar ? root.bar.fontFamily : Commons.Style.font.family
         fontSize: root.tokens ? root.tokens.captionSize : 10
         foreground: Commons.Util.alpha(root.widgetInk, 0.5)
@@ -289,6 +275,33 @@ Ui.Panel {
         onPressed: function(button) {
           if (button === Qt.RightButton && root.bar) root.bar.run("omarchy-menu-timezone")
           else root.toggle()
+        }
+
+        // Keep the native line-box centring: the smaller date sits raised
+        // beside the clock. Only paint is snapped; reservation/input stay native.
+        Presentation.BarInk { id: datePlacement; target: dateLabel }
+        Text {
+          id: dateLabel
+          transform: Translate {
+            x: datePlacement.snapX(0)
+            y: datePlacement.snapY(0)
+          }
+          visible: !dateButton.labelVisible
+          anchors.centerIn: parent
+          textFormat: Text.PlainText
+          text: dateButton.text
+          color: dateButton.active && dateButton.useActiveColor
+            ? dateButton.activeColor : dateButton.foreground
+          font.family: dateButton.fontFamily
+          font.pixelSize: dateButton.fontSize
+          renderType: Text.NativeRendering
+          rotation: dateButton.textRotation
+          horizontalAlignment: Text.AlignHCenter
+          verticalAlignment: Text.AlignVCenter
+          Behavior on color {
+            enabled: !root.bar || root.bar.foregroundAnimationEnabled
+            ColorAnimation { duration: 160 }
+          }
         }
       }
     }

@@ -28,10 +28,17 @@ Item {
   property int sinkAvailabilityRequestGeneration: 0
   property int sinkAvailabilityProcessGeneration: 0
   property bool sinkAvailabilityProcessStarted: false
+  property bool sinkAvailabilityDirty: true
+  property double sinkEventsStartedAt: 0
+  property int sinkEventsQuickExits: 0
   property int volumeSinkRequestGeneration: 0
   property int volumeSinkProcessGeneration: 0
   property bool volumeSinkProcessStarted: false
   property bool volumeSinkProcessDiscarded: false
+  property int volumeSinkStallTicks: 0
+  readonly property bool volumeSinkShouldRun: root.active
+    && root.backendOverride === null && implementation.backendReady()
+    && !root.volumeSinkResolved
   // Keep the last primitive value while the asynchronous volume-sink
   // resolver is refreshing. Opening the panel acquires peak monitoring,
   // which can transiently invalidate link-derived sink state.
@@ -42,6 +49,7 @@ Item {
   readonly property bool ready: implementation.ready()
 
   onActiveChanged: {
+    if (root.active) root.sinkEventsQuickExits = 0
     if (root.backendOverride === null) {
       root.invalidateVolumeSink()
       root.invalidateSinkAvailability()
@@ -588,7 +596,10 @@ Item {
       if (!source.audio)
         return result(false, "unavailable", "Input is unavailable",
           Model.stableNodeId(source, "source"))
-      source.audio.muted = !source.audio.muted
+      const muted = !source.audio.muted
+      source.audio.muted = muted
+      if (root.backendOverride === null)
+        Quickshell.execDetached(["omarchy-brightness-keyboard-mute", muted ? "on" : "off"])
       root.generation++
       return result(true, "ok", "", Model.stableNodeId(source, "source"))
     }
@@ -645,6 +656,7 @@ Item {
     running: root.active && root.backendOverride === null
       && implementation.backendReady() && !root.sinkAvailabilityResolved
     onStarted: {
+      root.sinkAvailabilityDirty = false
       root.sinkAvailabilityProcessStarted = true
       root.sinkAvailabilityProcessGeneration =
         root.sinkAvailabilityRequestGeneration
@@ -694,28 +706,55 @@ Item {
     }
   }
 
+  Process {
+    id: sinkEvents
+    property bool enabled: root.active && root.backendOverride === null && implementation.backendReady()
+    onEnabledChanged: running = enabled && root.sinkEventsQuickExits < 3
+    command: ["setpriv", "--pdeathsig", "TERM", "pactl", "subscribe"]
+    environment: ({ LC_ALL: "C" })
+    onStarted: root.sinkEventsStartedAt = Date.now()
+    onExited: {
+      root.sinkAvailabilityDirty = true
+      if (enabled) root.sinkEventsQuickExits = Date.now() - root.sinkEventsStartedAt < 1000 ? root.sinkEventsQuickExits + 1 : 0
+    }
+    stdout: SplitParser { onRead: function(line) { if (/ on (card|sink|server) #/.test(line)) root.sinkAvailabilityDirty = true } }
+  }
+
   Timer {
     interval: 5000
     repeat: true
     running: root.active && root.backendOverride === null
     onTriggered: {
       if (!implementation.backendReady()) return
-      if (!sinkAvailabilityProcess.running)
+      root.volumeSinkStallTicks = volumeSinkProcess.running
+        ? root.volumeSinkStallTicks + 1 : 0
+      if (root.volumeSinkStallTicks >= 2) {
+        // Recover the display even if termination never delivers onExited.
+        root.volumeSinkName = ""
+        root.volumeSinkResolutionFailed = true
+        root.volumeSinkStallTicks = 0
+        volumeSinkProcess.running = false
+        volumeSinkProcess.running = Qt.binding(function() { return root.volumeSinkShouldRun })
+      }
+      if (!sinkAvailabilityProcess.running && (root.sinkAvailabilityDirty || !sinkEvents.running))
         root.invalidateSinkAvailability()
+      if (sinkEvents.enabled && !sinkEvents.running && root.sinkEventsQuickExits < 3) sinkEvents.running = true
       if (!volumeSinkProcess.running
           && (!root.volumeSinkResolved
             || root.volumeSinkResolutionFailed
-            || !implementation.volumeSinkNameMapped()))
+            || !implementation.volumeSinkNameMapped())) {
         root.invalidateVolumeSink()
+        volumeSinkProcess.running = Qt.binding(function() { return root.volumeSinkShouldRun })
+      }
     }
   }
 
   Process {
     id: volumeSinkProcess
     command: ["omarchy-audio-output-sink"]
-    running: root.active && root.backendOverride === null
-      && implementation.backendReady() && !root.volumeSinkResolved
+    running: root.volumeSinkShouldRun
     onStarted: {
+      root.volumeSinkStallTicks = 0
       root.volumeSinkProcessStarted = true
       root.volumeSinkProcessGeneration = root.volumeSinkRequestGeneration
     }

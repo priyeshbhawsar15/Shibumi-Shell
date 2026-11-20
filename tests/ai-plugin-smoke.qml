@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import "ai" as Ai
 
 ShellRoot {
@@ -39,6 +40,220 @@ ShellRoot {
   function fail(message) {
     console.error("ai-plugin-smoke:", message)
     Qt.exit(1)
+  }
+
+  function compactTooltipContract() {
+    claudeProvider.rateLimitResetAt = "2000-01-01T00:00:00Z"
+    const checks = { selectedReset: aiService.tooltipText() === "Claude Code · live\nSession: 3% · resets in now" }
+    claudeProvider.rateLimitResetAt = ""; claudeProvider.secondaryRateLimitLabel = ""
+    checks.clock = emptyAgentsPanel.clockRunning === false; emptyPanelOwner.opened = true
+    checks.clock = checks.clock && emptyAgentsPanel.clockRunning === true; emptyPanelOwner.opened = false
+    checks.clock = checks.clock && emptyAgentsPanel.clockRunning === false
+    console.log("AI_PRESENTATION_CASES", JSON.stringify(checks))
+    const layout = { noBalance: emptyAgentsPanel.balanceVisible === false }
+    console.log("243_AI_LAYOUT", JSON.stringify(layout))
+    return Object.values(checks).every(value => value) && Object.values(layout).every(value => value)
+  }
+
+  function descendants(item) {
+    return Array.from(item.children || []).reduce((items, child) => items.concat([child], descendants(child)), [])
+  }
+
+  function compactDailyTokenLabels() {
+    const record = JSON.parse(codexStatusRecord(true, true))
+    record.id = "claude"; record.name = "Claude Code"
+    emptyAgentsPanel.aiService = agentsService
+    emptyAgentsPanel.contentWidth = 320
+    emptyAgentsPanel.nowMs = Date.now()
+    const values = [1054540000, 1002400000, 1295660000, 1765390000,
+      2054540000, 3002400000, 4007230000]
+    record.recentDays = values.map((value, i) => ({
+      date: emptyAgentsPanel.dayKey(i - 6), messageCount: value }))
+    agentsService.applyAgentRecord("claude", JSON.stringify(record))
+    agentsService.selectTool("claude")
+    Qt.callLater(function() {
+      const columns = root.descendants(emptyAgentsPanel).filter(item =>
+        item.modelData && typeof item.modelData.messageCount === "number"
+        && item.modelData.date && item.children.length === 2)
+      const labels = columns.map(column => ({ value: column.modelData.messageCount,
+        text: column.children[0].text, implicitWidth: column.children[0].implicitWidth,
+        columnWidth: column.width }))
+      const example = agentsService.formatTokens(1054540000)
+      console.log("AI_DAILY_TOKEN_LABELS", JSON.stringify({example: example, labels: labels}))
+      if (example !== "1.1B" || labels.length !== 7 || !labels.every(label =>
+          label.value >= 1e9 && label.columnWidth > 0
+          && label.implicitWidth <= label.columnWidth))
+        return root.fail("daily token labels exceed their columns or compact format drifted")
+      genericProbe.start()
+    })
+  }
+
+  QtObject { id: cacheShell; property var state: null; property var bar: fakeBar; function serviceFor(_id) { return state } }
+  Component { id: cacheProbe; Ai.Service {
+    property var calls: []
+    function startBackendProcess(_kind, command) { calls = calls.concat([command]); return true }
+  } }
+  function checkCachedDiscovery() {
+    const timer = (s, ms) => Array.from(s.resources).find(o => "interval" in o && o.interval === ms)
+    for (const hours of [1, 7, 0, 6, 25, -1, 2, 3]) {
+      cacheShell.state = null
+      const p = cacheProbe.createObject(startupEmpty, {shell: cacheShell, omarchyPath: startupEmpty.omarchyPath, agentsUsageDirOverride: startupEmpty.agentsUsageDir})
+      p.providerOverrides = ["claude", "codex", "grok", "hermes", "opencode"].map(id => ({providerId: id, ready: true}))
+      const before = p.providerEnablementSignature, now = Date.now(), at = now - hours * 3600000
+      if (hours !== 0) p.applyAgentRecord("unused", JSON.stringify({schemaVersion: hours === 3 ? 2 : 1, id: "unused", name: "Unused", ready: false, limits: [], updatedAt: new Date(at).toISOString()}), now)
+      cacheShell.state = agentsState; void(p.serviceActive); void(p.providers); timer(p, 10000).triggered()
+      if (hours === 2) { fakeBar.agentsDisabled = true; fakeBar.agentsDisabled = false }
+      timer(p, 120000).triggered()
+      if (before === p.providerEnablementSignature || p.calls[0].slice(2).join(" ") !== "--except opencode --except fireworks claude codex grok hermes"
+          || p.calls.length !== (hours === 1 ? 1 : 2) || (hours === 1 && p.lastDiscoveryStartedAtMs !== at)) { p.destroy(); return false }
+      console.log("442_AI_CACHE", JSON.stringify({hours: hours, commands: p.calls, nextDueAfterStartMs: (hours === 1 ? -3600000 : 120000) + p.agentsDiscoveryInterval}))
+      p.lastDiscoveryStartedAtMs = Date.now() - p.agentsDiscoveryInterval + 1000; p.requestPeriodicBackend(); if (p.runningBackendDiscovery) { p.destroy(); return false }
+      p.lastDiscoveryStartedAtMs = Date.now() - p.agentsDiscoveryInterval; p.requestPeriodicBackend(); if (!p.runningBackendDiscovery) { p.destroy(); return false }
+      const savedService = emptyAgentsPanel.aiService, discoveryAt = p.lastDiscoveryStartedAtMs, flags = () => JSON.stringify([p.pendingBackendRefresh, p.pendingBackendForce, p.pendingBackendDiscovery, p.startupRefreshPending, p.startupDiscoveryPending]), beforeFlags = flags()
+      p.runningBackendDiscovery = false; p.providerOverrides = ["claude", "codex"].map(id => ({providerId: id, ready: true})); p.calls = []; emptyAgentsPanel.aiService = p
+      const openingDiscoveryFlag = p.runningBackendDiscovery; emptyPanelOwner.opened = true; void(emptyAgentsPanel.open); emptyPanelOwner.opened = false; void(emptyAgentsPanel.open)
+      const openRuns = p.calls.length, command = p.calls[0]; p.backendProcessKind = "agents-update"; p.panelOpened()
+      const activeRuns = p.calls.length - openRuns, activeQueued = p.pendingBackendRefresh; p.finishBackendProcess(1); const failedRuns = p.calls.length - openRuns, failedQueued = p.pendingBackendRefresh || p.pendingBackendDiscovery; p.pendingBackendRefresh = true; p.panelOpened()
+      const pendingRuns = p.calls.length - openRuns; p.pendingBackendRefresh = false; p.providerOverrides = [{providerId: "opencode", ready: true}]; p.panelOpened()
+      const emptyRuns = p.calls.length - openRuns; emptyAgentsPanel.aiService = savedService
+      const unchanged = p.lastDiscoveryStartedAtMs === discoveryAt && flags() === beforeFlags && !openingDiscoveryFlag && p.runningBackendDiscovery
+      console.log("457_AI_OPEN", JSON.stringify({hours: hours, openRuns: openRuns, command: command, activeRuns: activeRuns, activeQueued: activeQueued, pendingRuns: pendingRuns, emptyRuns: emptyRuns, openingDiscoveryFlag: openingDiscoveryFlag, failedRuns: failedRuns, failedQueued: failedQueued, discoveryBefore: discoveryAt, discoveryAfter: p.lastDiscoveryStartedAtMs, flagsUnchanged: flags() === beforeFlags}))
+      if (openRuns !== 1 || activeRuns || activeQueued || pendingRuns || emptyRuns || failedRuns || failedQueued || !unchanged || command.slice(2).join(" ") !== "--limits-only --except opencode --except fireworks claude codex") { p.destroy(); return false }
+      p.destroy()
+    }
+    return true
+  }
+  property bool startupChecked: false
+  Ai.Service { id: startupEmpty; shell: agentsShell
+    omarchyPath: Quickshell.env("SHIBUMI_TEST_OMARCHY_PATH")
+    agentsUsageDirOverride: omarchyPath + "/bin"
+  }
+  function checkStartup() {
+    const s = agentsService
+    if (s.providers.length !== 2) return false
+    if (!checkCachedDiscovery()) { fail("cached discovery/startup enablement/periodic boundary"); return false }
+    const timer = (service, ms) => Array.from(service.resources).find(o => "interval" in o && o.interval === ms)
+    const first = timer(s, 10000), discovery = timer(s, 120000)
+    if (!first.running || !discovery.running || first.repeat || discovery.repeat || s.backendProcessKind !== "") { fail("startup clocks/early dispatch"); return false }
+    s.reconcileBackendLifecycle(false)
+    if (s.backendProcessKind !== "") { fail("pre-start reconcile dispatched"); return false }
+    first.triggered()
+    if (s.backendProcessKind !== "agents-update" || s.runningBackendDiscovery) { fail("first startup run was not tab-only"); return false }
+    discovery.triggered()
+    if (!s.pendingBackendRefresh || !s.pendingBackendDiscovery || s.pendingBackendForce) { fail("startup discovery did not coalesce unforced"); return false }
+    legacyService.startupRefreshPending = false; legacyService.backendProcessKind = "legacy-detection"
+    legacyService.reconcileBackendLifecycle(false); legacyService.finishBackendProcess(0)
+    if (legacyService.backendProcessKind !== "legacy-detection" || legacyService.pendingBackendRefresh) { fail("legacy settings refresh was dropped before startup discovery"); return false }
+    timer(startupEmpty, 10000).triggered()
+    if (startupEmpty.backendProcessKind !== "agents-update" || !startupEmpty.runningBackendDiscovery || startupEmpty.startupDiscoveryPending) { fail("empty startup did not discover once"); return false }
+    console.log("436_AI_STARTUP", "controlled Timer.triggered: records visible before work; tab-only at nominal 10000ms; queued discovery at 120000ms; empty discovery at 10000ms")
+    startupChecked = true; return true
+  }
+  property int refreshDemandStage: 0
+  property double serviceTraceStarted: Date.now()
+  Connections {
+    target: agentsService
+    function onBackendRunningChanged() {
+      if (agentsService.backendRunning) console.log("436_AI_COMMAND", Date.now() - root.serviceTraceStarted,
+        JSON.stringify(Array.from(agentsService.resources).filter(p => "command" in p && p.command[0] === agentsService.agentsUpdateScript).map(p => p.command)))
+    }
+  }
+  function refreshDemandContract() {
+    const s = agentsService
+    if (s.backendRunning || s.backendProcessKind !== "") return false
+    if (refreshDemandStage === 1) {
+      s.backendProcessKind = "agents-update"; s.runningBackendDiscovery = true; s.finishBackendProcess(1)
+      if (s.backendRunning || s.pendingBackendRefresh) { fail("failed discovery retried itself"); return false }
+      s.requestPeriodicBackend()
+      if (s.backendProcessKind !== "agents-update" || s.runningBackendDiscovery) { fail("periodic tab refresh did not start"); return false }
+      refreshDemandStage = 2; return false
+    }
+    if (refreshDemandStage === 2) { s.refreshAll(true); refreshDemandStage = 3; return false }
+    if (refreshDemandStage === 3) { refreshDemandStage = 4; console.log("436_AI_DEMAND passed"); return true }
+    s.providerOverrides = ["claude", "codex", "grok", "hermes", "opencode"].map(id => ({providerId: id, ready: true}))
+    const before = s.agentsUpdateCommand(false), after = s.agentsUpdateCommand(false, false)
+    let ok = after.slice(2).join(" ") === "--except opencode --except fireworks claude codex grok hermes"
+    console.log("436_AI_TAB_COMMANDS", JSON.stringify({before: before, after: after}))
+    s.providerOverrides = []; s.backendProcessKind = "agents-update"; s.runningBackendDiscovery = false
+    s.pendingBackendRefresh = false; s.pendingBackendForce = false; s.pendingBackendDiscovery = false
+    s.lastDiscoveryStartedAtMs = Date.now(); s.requestPeriodicBackend()
+    ok = ok && s.pendingBackendRefresh && !s.pendingBackendDiscovery && !s.pendingBackendForce
+    s.lastDiscoveryStartedAtMs = Date.now() - s.agentsDiscoveryInterval; s.requestPeriodicBackend()
+    ok = ok && s.pendingBackendDiscovery; s.pendingBackendDiscovery = false
+    const records = s.agentRecords; s.agentRecords = ({}); s.providerRevision++; s.requestPeriodicBackend()
+    ok = ok && s.pendingBackendDiscovery; s.agentRecords = records; s.providerRevision++
+    s.pendingBackendRefresh = false; s.pendingBackendDiscovery = false; s.backendError = ""
+    s.finishBackendProcess(1)
+    if (!ok || s.backendProcessKind !== "agents-update" || !s.runningBackendDiscovery || s.pendingBackendRefresh) {
+      console.log("436_AI_DEMAND_FAILURE", ok, s.backendProcessKind, s.runningBackendDiscovery, s.pendingBackendRefresh)
+      fail("tab/discovery coalescing or failed-tab fallback"); return false
+    }
+    refreshDemandStage = 1; return false
+  }
+
+  property bool genericDisabled: false
+  property int genericPhase: 0
+  property string genericTool: "grok"
+  QtObject {
+    id: discoveryShell
+    property var shellConfig: ({bar: {layout: {left: [{id: "hancore.shibumi.ai", aiTool: root.genericTool,
+      providers: {codex: {enabled: !root.genericDisabled}}}]}}})
+    function serviceFor(id) { return id === "hancore.shibumi.state" ? agentsState : null }
+  }
+  Ai.Service {
+    id: discoveryService
+    shell: discoveryShell; runtimeProbesEnabled: false
+    omarchyPath: Quickshell.env("SHIBUMI_TEST_OMARCHY_PATH")
+    agentsUsageDirOverride: Quickshell.env("SHIBUMI_TEST_GENERIC_DIR")
+  }
+  Loader { id: genericMark; active: genericProbe.running && root.genericPhase < 2; sourceComponent: Ai.BarWidget { bar: fakeBar; aiServiceOverride: discoveryService } }
+  Process {
+    id: mutateRecords
+    command: ["bash", "-c", "jq '.id = \"kimi\"' \"$1/agy.json\" > \"$1/kimi.json\"; rm -- \"$1/grok.json\"", "fixture", discoveryService.agentsUsageDir]
+    onExited: discoveryService.rescanAgents()
+  }
+  Timer {
+    id: genericProbe; interval: 80; repeat: true
+    onTriggered: {
+      if (root.refreshDemandStage !== 4) { root.fail("demand checks unfinished"); return }
+      const ids = discoveryService.providers.map(p => p.providerId).join(",")
+      if (root.genericPhase === 0) {
+        const fireworks = discoveryService.providerFor("fireworks")
+        const neutral = root.descendants(genericMark.item).filter(item => "fallbackText" in item && item.fallbackText === "smart_toy")
+        if (ids !== "agy,claude,codex,fireworks,grok"
+            || discoveryService.usagePercent(discoveryService.providerFor("claude")) !== 41
+            || discoveryService.usagePercent(discoveryService.providerFor("agy")) !== 29
+            || !fireworks || fireworks.ready || fireworks.usageStatusText !== "Sign in to Fireworks"
+            || discoveryService.limitWindows(fireworks).length !== 0
+            || neutral.length !== 2 || !neutral.every(mark => mark.candidateIndex >= mark.candidates.length))
+          return root.fail("generic discovery/order/fraction/status/marks: " + ids)
+        root.genericTool = ids.split(",")[0]
+        discoveryService.selectTool(ids.split(",").pop())
+        root.genericTool = fakeState.selectedTool
+        if (discoveryService.selectedTool !== "grok"
+            || discoveryService.providers.map(p => p.providerId).join(",") !== ids)
+          return root.fail("provider selection reordered the tabs")
+        root.genericPhase = 1; root.genericTool = "agy"; fakeBar.background = "#ffffff"
+      } else if (root.genericPhase === 1) {
+        const marks = root.descendants(genericMark.item).filter(item => "resolvedSource" in item)
+        if (marks.length !== 2 || !marks.every(mark => String(mark.resolvedSource).endsWith("/agy-light.svg")))
+          return root.fail("generic Omarchy light SVG priority")
+        root.genericPhase = 2; emptyAgentsPanel.aiService = discoveryService; root.genericTool = "fireworks"
+        root.genericDisabled = true; mutateRecords.running = true
+      } else if (root.genericPhase === 2 && ids === "agy,claude,fireworks,kimi") {
+        if (emptyAgentsPanel.providerEmptyStateText !== "Authenticate"
+            || discoveryService.agentIds.length !== 5 || discoveryService.providerFor("codex") !== null)
+          return root.fail("generic removal/addition/disabled id")
+        console.log("423_GENERIC", ids, "percent=41/29 status=PASS marks=PASS runtime-add-remove=PASS disabled=PASS")
+        if (Quickshell.env("SHIBUMI_TEST_EMPTY_AGENTS_DIR")) { root.genericPhase = 3; discoveryService.agentsUsageDirOverride += "/empty"; Qt.callLater(discoveryService.rescanAgents); return }
+        stop(); watchdog.stop(); console.log("ai plugin smoke passed"); Qt.quit()
+      } else if ((root.genericPhase === 3 || root.genericPhase === 4) && discoveryService.agentIds.length === 22 && ids === "" && !mutateRecords.running) {
+        mutateRecords.command = ["bash", "-c", root.genericPhase === 3 ? "jq '.ready = false | .tierLabel = \"Prepaid\" | .usageStatusText = \"Fireworks unavailable\"' \"$1/fireworks.json\" > \"$1/phantom\"; mv \"$1/phantom\" \"$1/fireworks.json\"" : "jq '.id = \"claude-ready\"' \"$1/../claude.json\" > \"$1/claude-ready.json\"", "fixture", discoveryService.agentsUsageDir]; root.genericPhase++; mutateRecords.running = true
+      } else if (root.genericPhase === 5 && discoveryService.agentIds.length === 23 && ids === "claude-ready") {
+        if (discoveryService.usagePercent(discoveryService.providerFor("claude-ready")) !== 41) return root.fail("4.5.0 synthetic Claude fraction")
+        console.log("423_450_EMPTY", "0/23; phantom Fireworks still 0/23; then 1/24 (claude-ready filename/id)"); stop(); watchdog.stop(); console.log("ai plugin smoke passed"); Qt.quit()
+      }
+    }
   }
 
   function linearChannel(value) {
@@ -81,8 +296,8 @@ ShellRoot {
       && agentsService.usagePercent(codex) === 24
       && claude.rateLimitPercent === -1
       && claude.secondaryRateLimitPercent === -1
-      && claude.models.length === 0
-      && codex.models.length === 0
+      && claude.models.length === 1
+      && codex.models.length === 1
       && codex.todayTotalTokens === 1031649
       && codex.latestModel === ""
       && claude.ready && codex.ready
@@ -122,7 +337,7 @@ ShellRoot {
 
   function advanceCodexStatusProbe() {
     if (codexStatusProbeStage === 0) {
-      codexStatusOriginalRecord = agentsService.agentsCodexRecord
+      codexStatusOriginalRecord = agentsService.agentRecords.codex
       codexStatusOriginalTool = fakeState.selectedTool
       fakeState.selectedTool = "codex"
       fakeState.revision++
@@ -141,7 +356,8 @@ ShellRoot {
     if (codexStatusProbeStage === 1) {
       if (agentsService.providerStatusText(provider) !== "partial"
           || emptyAgentsPanel.providerStatusLabel !== "partial"
-          || agentsService.tooltipText().indexOf("Codex · partial") < 0) {
+          || !emptyAgentsPanel.limitsUnavailableVisible
+          || agentsService.tooltipText() !== "Codex · partial\nCodex limits unavailable") {
         fail("Codex partial status did not propagate")
         return false
       }
@@ -169,13 +385,54 @@ ShellRoot {
       return false
     }
 
-    agentsService.agentsCodexRecord = codexStatusOriginalRecord
+    agentsService.agentRecords.codex = codexStatusOriginalRecord
     agentsService.providerRevision++
     fakeState.selectedTool = codexStatusOriginalTool
     fakeState.revision++
     agentsState.revision++
     codexStatusProbePassed = true
     return true
+  }
+
+  function failedRefreshKeepsFreshUsage() {
+    if (agentsService.backendRunning || agentsService.backendProcessKind !== "")
+      return false
+    const raw = JSON.parse(codexStatusRecord(true, true))
+    raw.id = "claude"; raw.name = "Claude Code"
+    agentsService.applyAgentRecord("claude", JSON.stringify(raw))
+    // Deliver the same nonzero completion as a timed-out update, without
+    // waiting 120 seconds or invoking a real account collector.
+    agentsService.backendProcessKind = "agents-update"
+    agentsService.backendError = ""
+    agentsService.finishBackendProcess(1)
+    const fresh = agentsService.providerFor("claude")
+    const checks = { freshAfterFailure: fresh && fresh.ready
+      && agentsService.usagePercent(fresh) === 24
+      && agentsService.providerStatusText(fresh) === "live"
+      && emptyAgentsPanel.providerStatusLabel === "live"
+      && agentsService.tooltipText() === "Claude Code · live\nWeekly: 24%" }
+    const record = agentsService.agentRecords.claude
+    const threshold = 2 * agentsService.agentsRefreshInterval
+    const boundary = agentsService.providerSnapshot(record,
+      record.updatedAtMs + threshold)
+    checks.atThreshold = boundary && boundary.ready
+      && agentsService.usagePercent(boundary) === 24
+      && agentsService.providerStatusText(boundary) === "live"
+    // Age the same record in place: only the existing expiry/revision path
+    // may invalidate the already cached provider snapshot.
+    record.updatedAtMs = Date.now() - threshold - 1
+    record.updatedAt = new Date(record.updatedAtMs).toISOString()
+    record.expiresAtMs = record.updatedAtMs + 24 * 60 * 60 * 1000
+    const revision = agentsService.providerRevision
+    agentsService.expireAgentRecords(Date.now())
+    const aged = agentsService.providerFor("claude")
+    checks.staleByAge = agentsService.providerRevision > revision
+      && aged && aged.ready && agentsService.usagePercent(aged) === 24
+      && agentsService.providerStatusText(aged) === "stale"
+      && emptyAgentsPanel.providerStatusLabel === "stale"
+      && agentsService.tooltipText() === "Claude Code · stale\nWeekly: 24%"
+    console.log("268_AI_REFRESH_AGE", JSON.stringify(checks))
+    return Object.values(checks).every(value => value)
   }
 
   function readyRecordWithoutCurrentDataAccepted() {
@@ -204,13 +461,13 @@ ShellRoot {
     const provider = agentsService.providerFor("claude")
     const accepted = provider && provider.ready
       && agentsService.usagePercent(provider) === -1
-      && provider.models.length === 0
+      && provider.models.length === 1
       && provider.latestModel === ""
       && agentsService.providerCurrentDataMessage(provider)
         === "Authenticate Claude"
 
     const expiredSnapshotRejected = agentsService.providerSnapshot(
-      agentsService.agentsClaudeRecord,
+      agentsService.agentRecords.claude,
       recordNow + 24 * 60 * 60 * 1000 + 1) === null
 
     agentsService.applyAgentRecord("claude", JSON.stringify({
@@ -375,6 +632,8 @@ ShellRoot {
       "7d-utilization": "0.10",
       _day: currentDay,
       _today_tokens: 150,
+      _today_prompts: 2, _today_sessions: 3,
+      _recent_days: [{ date: currentDay, messageCount: 150 }],
       _tokens_used: 200,
       _rate_per_hour: 50,
       _model: "current-model",
@@ -385,6 +644,8 @@ ShellRoot {
     openCodeParserProbe.parseScannerOutput(success)
     const loaded = openCodeParserProbe.ready
       && openCodeParserProbe.todayTotalTokens === 150
+      && openCodeParserProbe.todayPrompts === 2 && openCodeParserProbe.todaySessions === 3
+      && JSON.stringify(openCodeParserProbe.recentDays) === JSON.stringify(JSON.parse(success)._recent_days)
       && openCodeParserProbe.windowTokens === 200
       && openCodeParserProbe.hourlyTokens === 50
       && openCodeParserProbe.latestModel === "current-model"
@@ -393,6 +654,8 @@ ShellRoot {
 
     openCodeParserProbe.handleLocalMidnight()
     const midnightCleared = openCodeParserProbe.todayTotalTokens === 0
+      && openCodeParserProbe.todayPrompts === 0 && openCodeParserProbe.todaySessions === 0
+      && openCodeParserProbe.recentDays[0].date === currentDay
       && openCodeParserProbe.latestModel === ""
       && openCodeParserProbe.models.length === 0
       && openCodeParserProbe.dataDay === ""
@@ -402,6 +665,7 @@ ShellRoot {
     openCodeParserProbe.parseScannerOutput(success)
     openCodeParserProbe.parseScannerOutput('{"ready":false}')
     const unavailableCleared = !openCodeParserProbe.ready
+      && openCodeParserProbe.todayPrompts === 0 && openCodeParserProbe.todaySessions === 0 && openCodeParserProbe.recentDays.length === 0
       && openCodeParserProbe.rateLimitPercent === -1
       && openCodeParserProbe.secondaryRateLimitPercent === -1
       && openCodeParserProbe.todayTotalTokens === 0
@@ -413,6 +677,7 @@ ShellRoot {
     openCodeParserProbe.parseScannerOutput(success)
     openCodeParserProbe.parseScannerOutput("not-json")
     const malformedCleared = !openCodeParserProbe.ready
+      && openCodeParserProbe.todayPrompts === 0 && openCodeParserProbe.todaySessions === 0 && openCodeParserProbe.recentDays.length === 0
       && openCodeParserProbe.todayTotalTokens === 0
       && openCodeParserProbe.windowTokens === 0
       && openCodeParserProbe.latestModel === ""
@@ -442,9 +707,9 @@ ShellRoot {
     const customBaseContrast = root.contrastRatio(
       root.composite(expectedBase, fakeBar.customFill, expected.baseOpacity),
       fakeBar.customFill)
-    const glyphWidth = expected.providerId === "opencode" ? 20
+    const glyphWidth = expected.providerId === "opencode" ? 15
       : expected.providerId === "codex" ? 14 : 15
-    const glyphHeight = expected.providerId === "opencode" ? 12
+    const glyphHeight = expected.providerId === "opencode" ? 10
       : expected.providerId === "codex" ? 14 : 15
     const glyphOffset = 0
     const contentOffset = expected.providerId === "codex" ? -1 : 0
@@ -883,6 +1148,7 @@ ShellRoot {
     repeat: true
     running: true
     onTriggered: {
+      if (!root.startupChecked && !root.checkStartup()) return
       if (!root.midnightRacePassed) {
         root.midnightRaceTicks++
         if (root.midnightRaceStage === 1
@@ -904,6 +1170,7 @@ ShellRoot {
           return root.fail("OpenCode midnight refresh race timed out")
         }
       }
+      if (root.phase > 0 && root.refreshDemandStage < 4) root.refreshDemandContract()
       root.ticks++
       const first = firstLoader.item
       const second = secondLoader.item
@@ -928,6 +1195,7 @@ ShellRoot {
               || delayedSelectionState.confirmedTool !== "claude")
             return root.fail("AI selection did not preview before persistence readback")
           delayedSelectionState.previewTool = "claude"
+          if (!root.compactTooltipContract()) return root.fail("compact selected-provider tooltip or unavailable panel")
         }
         if (!first.visible || !second.visible || first.aiService !== aiService
             || second.aiService !== aiService
@@ -954,13 +1222,9 @@ ShellRoot {
                 !== "Run `claude auth login` to restore authoritative usage."
               || emptyAgentsPanel.primaryUsageVisible
               || emptyAgentsPanel.secondaryUsageVisible
-              || emptyAgentsPanel.renderedModelCount !== 0
+              || emptyAgentsPanel.renderedModelCount !== 1
               || first.childPanelWidget("omarchy.agents") !== first
-              || first.tooltipText.indexOf("5h: not reported by Codex RPC") < 0
-              || first.tooltipText.indexOf("Codex (Pro Lite)") < 0
-              || first.tooltipText.indexOf("5h tokens: 2.3K") < 0
-              || first.tooltipText.indexOf("1h rate: 180/h") < 0
-              || first.tooltipText.indexOf("Latest today: local-test") < 0
+              || first.tooltipText !== "Claude Code · live\nSession: 3%"
               || !root.openCodeParserContract()))
           return root.fail("Claude/agents provider metadata")
         if (root.phase === 0) {
@@ -973,8 +1237,8 @@ ShellRoot {
           agentsState.revision++
           fakeBar.agentsDisabled = true
           const probeCommand = agentsService.agentsUpdateCommand(false)
-          if (probeCommand[probeCommand.length - 1] !== "--probe-only")
-            return root.fail("OpenCode probe depends on enabled agent collectors")
+          if (probeCommand.slice(2).join(" ") !== "--except opencode --except claude --except codex --except fireworks")
+            return root.fail("disabled/owned collectors were not excluded")
           fakeBar.agentsDisabled = false
           legacyService.refreshAll(true)
         }
@@ -1024,16 +1288,14 @@ ShellRoot {
               return root.fail("queued backend transition did not complete")
             return
           }
-          if (!agentsService.agentsUpdateHealthy
-              || agentsService.runningSettingsGeneration
+          if (agentsService.runningSettingsGeneration
                 !== agentsService.providerSettingsGeneration
               || agentsService.providerFor("claude") === null
               || agentsService.providerFor("codex") === null)
             return root.fail("queued Agents update did not become current")
+          emptyAgentsPanel.aiService = aiService; emptyPanelOwner.opened = true
           stop()
-          watchdog.stop()
-          console.log("ai plugin smoke passed")
-          Qt.quit()
+          root.compactDailyTokenLabels()
           return
         }
         if (first.panelLoaded || secondLoader.item !== null
@@ -1047,12 +1309,12 @@ ShellRoot {
         if (!root.waitingExpiryProbe) {
           if (!root.readyRecordWithoutCurrentDataAccepted())
             return root.fail("ready empty/stale agents record contract")
-          root.expiryProbeRecord = agentsService.agentsClaudeRecord
+          root.expiryProbeRecord = agentsService.agentRecords.claude
           const expiringRecord = ({})
           for (const key in root.expiryProbeRecord)
             expiringRecord[key] = root.expiryProbeRecord[key]
           expiringRecord.expiresAtMs = Date.now() + 30
-          agentsService.agentsClaudeRecord = expiringRecord
+          agentsService.agentRecords.claude = expiringRecord
           agentsService.providerRevision++
           root.waitingExpiryProbe = true
           root.ticks = 0
@@ -1063,20 +1325,11 @@ ShellRoot {
             return root.fail("loaded agent record expiry timer")
           return
         }
-        agentsService.agentsClaudeRecord = root.expiryProbeRecord
+        if (!root.failedRefreshKeepsFreshUsage())
+          return root.fail("failed refresh or stale status hid valid Claude usage")
+        agentsService.agentRecords.claude = root.expiryProbeRecord
         agentsService.providerRevision++
         root.waitingExpiryProbe = false
-        agentsService.agentsUpdateHealthy = false
-        agentsService.providerRevision++
-        if (agentsService.providerFor("claude").ready
-            || agentsService.providerFor("codex").ready
-            || agentsService.providerStatusText(
-              agentsService.providerFor("codex")) !== "stale"
-            || agentsService.usagePercent(
-              agentsService.providerFor("claude")) !== -1
-            || agentsService.usagePercent(
-              agentsService.providerFor("codex")) !== -1)
-          return root.fail("failed agents update did not suppress live quota")
         const backendGeneration = agentsService.providerSettingsGeneration
         agentsService.modelUsageSourceOverride =
           Quickshell.env("SHIBUMI_TEST_MODEL_USAGE_SOURCE")

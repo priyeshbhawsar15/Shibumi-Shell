@@ -1,5 +1,540 @@
 # Changelog
 
+## [0.2.5] - 2026-11-18
+
+Validated on Omarchy 4.5.0 (package 4.5.0-3, source v4.5.0 at ac2690cd7; source contracts and isolated fixtures); forward reference 551dc629.
+
+### Changed
+
+- AI: refresh only limits for the visible provider tabs when opening the panel, without starting a discovery.
+- AI: run usage collection at low priority on the last quarter of allowed CPUs, with at least two when available.
+
+## [0.2.4] - 2026-11-14
+
+Validated on Omarchy 4.5.0 (package 4.5.0-3, source v4.5.0 at ac2690cd7; source contracts and isolated fixtures); forward reference 551dc629.
+
+### Fixed
+
+- Status: promptly track recording starts and exits with either supported recorder and marker location.
+- Status: follow voxtype directly when the host status helper is absent, without retrying an unavailable backend.
+- Update Center: recheck package counts after package transactions without polling or reading the package log.
+- AI: avoid repeating a recent discovery after a shell restart when provider enablement is unchanged.
+- AI: report OpenCode prompts, sessions and the seven-day token series; prompts of subagent sessions are not counted.
+- Audio: mirror a microphone mute from the volume panel to the laptop's microphone LED.
+- Audio: keep the microphone level bar within the slider track.
+- Control Center: pad the Health version row on the left.
+- Power: show the status line below the profile buttons only for an error.
+
+### Changed
+
+- Audio: refresh sink availability on PulseAudio events, retaining the periodic fallback when subscription is unavailable.
+- Power: refresh the active power profile on its native change signal instead of polling every five seconds.
+- Validation: forward compatibility is pinned to Omarchy quattro 551dc629.
+
+## [0.2.3] - 2026-11-11
+
+Validated on Omarchy 4.5.0 (package 4.5.0-3, source v4.5.0 at ac2690cd7; source contracts and isolated fixtures); forward reference f428bb4f.
+
+### Fixed
+
+- Lifecycle: preserve the picker image style across `deactivate --keep-layout` and `activate`.
+- AI: keep provider tabs in a stable order when changing the selected provider.
+- AI: read OpenCode 2.x usage and count migrated messages only once, retaining legacy-store support.
+- Bar: avoid an empty V2 reconcile request only when both settled State and the planned native layout already match.
+
+### Changed
+
+- AI: refresh existing provider tabs periodically, with bounded discovery and a full discovery fallback after a failed tab-only update.
+- AI: defer automatic startup collection without forcing it, while reading existing records immediately.
+- Validation: forward compatibility is pinned to Omarchy quattro f428bb4f.
+
+### Removed
+
+- Unused declarations across 14 plugins and two obsolete, runner-less test fixtures.
+
+## [0.2.2] - 2026-11-09
+
+Validated on Omarchy 4.5.0 (package 4.5.0-3, source v4.5.0 at ac2690cd7; source contracts and isolated fixtures); forward reference 8e33e723.
+
+### Changed
+
+- Validation: forward compatibility is pinned to Omarchy quattro 8e33e723; the historical widget-pipeline control follows Beta.13's regions.
+
+### Fixed
+
+- Startup (#102): probe the host IPC surface and use `reloadPlugins` when available, retaining `rescanPlugins` on older hosts so the startup prime still obtains a replacement Bar.
+- Notifications: on Omarchy 4.5, Clear all hides every row of the host's history locally; ✕ hides one row; the host's history.json is not modified.
+- Recovery: accept a btrfs device-number change after a reboot only when the config-directory inode is unchanged and the interrupted journal predates the current boot.
+- Uninstall: refuse invalid menu-extension JSONC before starting the transaction, with the file path and guidance to fix it or move it aside and retry.
+- Bar: the plugin reconcile re-arms only when a busy store deferred it; since 0.2.1 every layout transition restarted it, and an unchanged V2 layout looped endlessly.
+
+## [0.2.1] - 2026-11-08
+
+Validated on Omarchy 4.5.0 (package 4.5.0-3, source v4.5.0 at ac2690cd7; source contracts and isolated fixtures); forward reference 84b3f287.
+
+### Changed
+
+- AI: the widget shows every agent-usage provider Omarchy publishes (Fireworks, Grok and Kimi on 4.5.0) with Omarchy's own admission rules and marks; nothing is hard-wired to Claude and Codex any more.
+- Quick Access: the idle button now toggles Omarchy Stay Awake, so the state survives shell reloads and reboots and is shared with the Status widget and Omarchy's own indicator; hosts without the idle service keep the session-only inhibitor. Requested by oko on Discord.
+
+### Fixed
+
+- Bar: a plugin or foreign widget that enters the host layout while a settings write is still pending is now placed into the V2 layout once that write settles, instead of staying missing until the next layout change.
+- #88: Read the moved per-monitor workspace state file with legacy-path fallback.
+- Lifecycle: after `deactivate --keep-layout`, `activate` no longer records Shibumi's own layout as the stock bar; `deactivate` strips suite widgets from the restored stock bar and falls back to Omarchy's default bar when nothing stock is left, and `uninstall` no longer leaves a Control Center entry behind, so switching back to the original Omarchy bar works again instead of failing after 60 s.
+- Control Center: a native-catalog refresh scheduled right before a shell handoff no longer throws during teardown.
+- Control Center: Reboot and Shutdown use Omarchy 4.5's `omarchy-system reboot|shutdown`; hosts that still ship the 4.0.6 scripts keep working.
+- Workspaces: the aurora focus marker no longer settles with a visible one-pixel step on integer-scale displays.
+- Display panel: the brightness bridge follows Omarchy's upcoming per-monitor panel API (forward 84b3f287) while keeping the 4.5.0 behaviour; where the upcoming panel has no display on/off switch, Shibumi shows none either.
+- V1: removing an added plugin that had been dragged into a base slot no longer fails and no longer blocks every other plugin change; the slot is left empty. Reported by oko on Discord.
+
+## [0.2.0] - 2026-11-04
+
+### Highlights
+
+- **First stable release.** Horizontal Top and Bottom bars on Omarchy Quattro, validated on
+  Omarchy 4.0.6 / Quickshell 0.3.2 / Qt 6.12 and against the forward reference 0d8edf38.
+  The release channel is stable; Beta 16.4, 16.5 and 16.5.1 installations update in place.
+- **Per-monitor workspaces (#88).** When Omarchy's monitor-workspaces state file exists, the
+  Workspaces widget shows and focuses the slots of its own monitor; without the file the
+  behavior is unchanged.
+- **Notifications on the new Omarchy engine.** The Recent list reads the host's history.json
+  read-only; on Omarchy 4.0.6 nothing changes.
+- **V1 "Icon only".** Every V1 widget gains a third presentation next to Default and Compact:
+  symbol only, no values. The clock keeps its time, the workspace row keeps every marker, Now
+  Playing shows only play/pause. Saved Compact settings are unchanged.
+- **Control Center header.** The "SHIBUMI V1 ACTIVE" status is replaced by a compact readout
+  of the rendered bar style and position, for example "Default · Top" or "Omarchy · Top".
+
+### Changed
+
+- Default-style marquee renders through a shader over a static text texture: one commit per
+  scroll step and about half the process CPU while media plays, with identical pixels.
+- Workspace widgets share one ink grid per module; GUI work per workspace switch drops from
+  about 220–280 ms to 12–26 ms in the fixture, pixels identical.
+- Memory Sweep runs are bound to the telemetry owner; an owner change ends the run and shows
+  "Sweep owner changed" instead of a vanished dialog.
+- Forward compatibility is pinned to Omarchy 0d8edf38 (2026-10-23).
+- Three unread media properties and an obsolete test fixture were removed.
+
+### Fixed
+
+- Status width oscillation at fractional scales (#92, by Matthew Guzzo): in the content-sized
+  Fit, Dock and Notch shells at 1.25x the status group's ink contraction fed back into its own
+  position, the bar resized by 1–3 px every frame and Quickshell pinned a core. The cause was
+  the shell origin being rounded to logical instead of device pixels; it is now snapped to the
+  device grid, and the reservation additionally ignores an immediate return to the value it
+  just left. At fractional scales Fit, Dock and Notch may sit up to one logical pixel from
+  their 16.5.1 position, with their left edge on a whole device pixel.
+- Switching to the stock Omarchy bar and back (Control Center → Bars, or `shibumi-suite
+  deactivate` / `activate`) now keeps the Shibumi bar position and the Theme & Wallpaper
+  provider: a bottom bar returns at the bottom, Tanzaku or Hearthstone is restored; while the
+  stock bar is active the native picker is used.
+- The low-battery pulse, the recording and voxtype indicators and the launcher hover effect no
+  longer animate every display frame. They step about ten times per second along the same
+  curve; on a 120 Hz display a bar with a low battery dropped from full-rate redraws (about a
+  tenth of a CPU core) to ten frames per second.
+
+### Validation
+
+- Complete forward (0d8edf38), installed-package and source-parity (4.0.6) aggregates, the
+  full Python suites and the identity, scaffold and documentation checks pass on the exact
+  candidate. Default and Compact rest images are pixel-identical to the previous candidate in
+  all 336 compared pairs; the 1.25x status cycle is reproduced and stopped in the fixture.
+
+### Known limits
+
+- Horizontal Top and Bottom bars are supported. Vertical bars are outside the 0.2.0 scope.
+- Notifications: the host hands plugins only the Do-Not-Disturb switch, so Live rows are
+  unavailable in the Shibumi panel. Recent comes from the host's persisted history. On
+  Omarchy 4.0.6 the list, per-row removal and "Clear all" work as before; on the new
+  notification engine (Omarchy 4.5 prerelease, forward pin 0d8edf38) Recent is read-only
+  and those two controls are hidden because the host offers no history mutation. Clicking a
+  Recent row only focuses the application. Notification focus remains limited when the
+  sender provides no supported application identity.
+- Omarchy 4.5 is validated against the pinned source tree 0d8edf38 and fixtures only, not
+  on a live 4.5 host. Support for every 4.5 build is not implied.
+- Content-sized shells (Fit, Dock, Notch): after a layout change that crosses a responsive
+  threshold (for example the centre group hiding or showing its date), the shell can settle
+  through a few one-device-pixel steps for well under a second. The self-induced relayout
+  cycle of the status group at fractional scales is fixed (shell origin on the device grid,
+  plus #92). Live acceptance of the final candidate on a fractional-scale host is pending.
+- Tray-drawer entries are retained and disclosed but not rendered in Shibumi; use the stock
+  Omarchy bar for their drawer presentation.
+- Physical multi-output, mixed-scale, hotplug, DPMS/suspend/resume, enterprise Wi-Fi and
+  Bluetooth device workflows need their own live evidence. No blanket hardware acceptance
+  follows from these fixtures.
+- Local whole-ink, workspace/Pacman, meter, Calendar overhang and charge-bolt raster limits
+  are not declared solved by the ordinary-text baseline work.
+- Bluetooth power affects all radios through the host helper and cannot clear a hardware
+  block. The 20-second pending deadline does not stop the detached process or prevent later
+  effects.
+- The horizontal update count shares the bar-value baseline and CPU ink spacing.
+  Its leading reservation grows on an output-scale grid. Status inner-spacing
+  savings are returned to the group width; centered Fit preserves whole-physical-
+  pixel movements relative to the previous raster phase. Complete other-widget
+  rectangles are not all RGBA-identical after translation, and the restored V1
+  island edges change slot backgrounds. Exact whole-bar pixel identity and
+  physical acceptance are not claimed.
+- Downgrade: Beta.15.4 and older cannot read V1 `order.parked`; they reset V1 order, roles
+  and splits while retaining other settings and V2. `--keep-settings` does not prevent this.
+  Back up the settings before a downgrade (see install.md) and restore them with a matching
+  payload.
+- Packaging: `shibumi-shell` is published through omarchy-pkgs (omacom/omarchy-pkgs#2119,
+  2026-11-04); AUR is not the target.
+
+## [0.1.1-beta.16.5.1] - 2026-10-23
+
+### Fixed
+
+- Accept Omarchy's renamed `appearance.theme` and `appearance.background` menu
+  keys while retaining `style.*` support and the host's native fallback actions.
+  Install, update, repair and migrate no longer reject an intact newer stock
+  menu. If neither key family exists, remove stale picker routing and warn
+  rather than aborting the transaction.
+- Restore Reactor quote text on Qt 6.12. Arrays delivered through QML signals
+  arrive as sequences rather than JavaScript Arrays; retain those quote choices
+  instead of discarding them before rendering. Normalize settled Bar layout
+  context at its signal boundary, preserving strict downstream validators, and
+  accept Quickshell's player sequences when resolving Audio stream labels.
+
+### Validation
+
+- The validation host is re-pinned to Omarchy 4.0.6 / Quickshell 0.3.2 (Qt 6.12) with the native catalog reference kept at Omarchy 4.0.4; the collector warm-PSS ceiling is 768 KiB on that stack, and QML fixtures force stderr logging under Qt 6.12. The forward compatibility reference stays `246f33a2`.
+
+## [0.1.1-beta.16.5] - 2026-10-22
+
+### Highlights
+
+- **Native Omarchy bar sections preserved.** All six sections, native center placement, and explicit widget moves survive bar/profile and CLI round trips; the host's fixed-edge contract is supplied. Tray-drawer entries are retained and disclosed; use the stock Omarchy bar for their drawer presentation.
+- **Resilient plugin catalog.** Malformed third-party manifests no longer disable the whole catalog or all widget actions. Affected rows retain native information, failures carry diagnostics, development-directory symlinks resolve canonically, and retained layouts survive CLI round trips.
+- **Lower-cost Media animation.** One bounded 40 ms step clock per surface drives marquee, Muse rotation, and pulse while preserving pause easing.
+- **Cava 1.0 smoothing restored.** Widget and panel share `noise_reduction = 35`, compared on real music against the previous cava 0.10.7 setting.
+- **Lifecycle and CLI diagnostics.** Picker routing recovers, uninstall reports leftovers, admission and menu-parse errors are named, shell handoffs are bounded with an owned-process fallback, and network traffic is requested only while visible.
+
+Omarchy 4.0.5 is admitted as the stable reference; the forward compatibility reference moves to `246f33a2`. Source installation remains the supported route; OPR packaging is planned, not AUR publication.
+
+### Validation
+
+In 480 private renderer sessions against Beta 16.4, playing-state process CPU fell by about **19% for Default** and **51% for Full** (median of paired five-second windows, lower in every pair). The figures come from a software-rendered fixture with a synthetic spectrum, not GPU smoothness or real-cava CPU. Paused and focus behaviour are unchanged within measurement resolution. Live validation ran on Omarchy 4.0.4 / Quickshell 0.3.1 and Omarchy 4.0.6 / Quickshell 0.3.2, including the real-music smoothing comparison; the third host covered an earlier candidate only.
+
+### Known points
+
+- The Default-style marquee commits two frames per scroll step while text scrolls (about 250 commits for 125 steps in five seconds). There is no visible effect and the cost stays well below Beta 16.4; a layer-free marquee is planned for 0.2.0.
+- Notch can still oscillate at DPR 1.6.
+- Notification focus remains limited when the sender does not provide a supported application identity.
+- If Memory Sweep loses its service owner, the authorization dialog may disappear without a result; avoid restarting Sweep during an owner change.
+- Beta 15.4 and older cannot read V1 `order.parked` and reset V1 order, roles, and splits even with `--keep-settings`. Keep complete settings and recovery backups before downgrading.
+
+## [0.1.1-beta.16.4] - 2026-10-14
+
+### Highlights
+
+- **Memory Sweep in the Memory panel.** Choose Page cache, Compact memory, or both, with one Polkit authorization. Available memory before and after the operation, cancellation, and errors appear in the panel. No swap operations or process killing; clearing caches does not guarantee a memory gain.
+- **Frost for the V2 Notch shell.** Notch gains the translucent Frost surface; Full, Fit, and Dock keep their fixed shell shadow. Frost controls transparency, not compositor blur; an optional Hyprland recipe is documented without changing your compositor settings. Connected panels keep their own opacity.
+- **Charging plasma from 10%.** A confined plasma core and five short sparks replace the battery ring's previous charging effect. The water animation is unchanged.
+- **Reliable Rings placement.** Rings starts on the correct workspace after activation or reload, including when the target arrives after layout. Other workspace styles no longer animate an invisible Rings frame.
+- **Power-profile selection stays open.** Mouse and keyboard selection update the active profile without closing or shifting the panel. Inactive labels remain readable with V2 and Catppuccin Latte.
+- **Small reliability fixes.** Unavailable AI usage displays an em dash, picker actions receive closed stdin, and deferred focus callbacks safely handle a destroyed panel. The audio bar follows the default sink again if the volume-sink resolver stalls after suspend/resume (#78). During recovery, DSP chains may temporarily fall back to the default sink.
+- **Smoother host-widget handoff.** Shared embedding keeps Status children loaded through bar handoff and preserves the official Audio panel instance. Existing Omarchy paths and IPC identifiers now share one contract layer, without adding backend owners or polling.
+
+The forward compatibility reference is updated to Omarchy `4c1b4cb3`. Source installation remains the supported route; OPR packaging is planned, not AUR publication.
+
+### Validation
+
+In 600 private-renderer sessions against Beta 16.3, the median per-group CPU change was **−29.7% for focus**, **−11.3% for style changes**, and **+0.14% for bar changes**. Rings style changes reached stable pixels earlier in all eight measured contexts, with median reductions of 40–217 ms. Bar switching was broadly at Beta 16.3's level. These measurements describe the tested renderer scenarios, not a blanket desktop speedup.
+
+### Known points
+
+- Notch can still oscillate at DPR 1.6.
+- Notification focus remains limited when the sender does not provide a supported application identity.
+- If Memory Sweep loses its service owner, the authorization dialog may disappear without a result. An already authorized command can continue, and a replacement owner may permit another run; avoid restarting Sweep during an owner change.
+
+## [0.1.1-beta.16.3] - 2026-10-09
+
+### Fixed
+
+- Workspaces: hovering a workspace no longer enlarges it. The hovered workspace now changes colour instead (the theme's `color03`; if the bar colour itself is `color03`, a lighter bar ink is used), with one uniform 120 ms transition in the default, numbers, magic, kanji, rings and aurora styles. The pacman style keeps its 16.2 behaviour.
+- Network widget: in V1 the network icon now follows the bar colour like every other widget instead of fixed tones.
+- Picker: the search field of the theme, wallpaper and media pickers is readable in every theme (12 px text in a visible input field; contrast 7:1 to 21:1 across the shipped themes, previously down to 1:1 on light themes).
+- Picker: themes without a preview image are listed again (with a placeholder), and the list is sorted alphabetically across all theme roots like `omarchy-theme-list`.
+- Status group: a pending spacing update can no longer be cleared early by a synchronous re-schedule.
+- Status and centre groups: embedded widgets (update centre, tray, centre) no longer disappear after switching to the stock Omarchy bar and back (needed a reload before).
+- Tests: the two reveal-budget and lazy-paint regressions from 16.2 now run in the repository test suite.
+- Compatibility: the forward-compatibility baseline is pinned to Omarchy `50d687a1` (2026-10-08) with a reproducible generator script; the 4.0.4 installation pins are unchanged.
+
+### Known issues
+
+- Rings style: right after a bar rebuild (reload, V1/V2 switch, workspace count change) the focus ring can be drawn about 6 px off for a single frame (16 ms). It is a build-time animation ordering effect and will be fixed with the host layout redesign in 0.2.0.
+- Notch bar at DPR 1.6 with the numbers or kanji style: the centre group can oscillate between two layouts for a while after a layout change. This exists since 16.1 (status spacing feedback) and is also addressed by the 0.2.0 redesign.
+
+## [0.1.1-beta.16.2] - 2026-10-08
+
+### Fixed
+
+- Workspaces: the workspace animation stutters since Beta 16 (#73). Paint subtrees are now created only for the active workspace style; the focus animation renders 11–13 real frames per switch again (4–6 in 16.1), style switch cycles are 29–41 % faster and bar switch cycles 11–14 % faster on our fixture. The rest images of all styles stay identical to 16.1 at DPR 1; at DPR 1.6 only glyph rasterisation differs by at most 4/255 on text pixels, and the numbers style now sits at its geometrically correct position (up to 1 physical pixel).
+- Centre group: the responsive stage (clock / clock+weather / clock+date+weather) could be decided with a stale host budget right after a bar reveal or a rebuild, briefly showing the date or hiding the weather. The decision is now deferred while the status group's spacing savings are still pending or the host budget is stale.
+- Status group: the 1–2-frame undershoot of the status icons right after a bar rebuild (spacing savings applied one frame late) no longer triggers a wrong centre stage.
+- Health: `shibumi-health` no longer reports plugins as "modified" because of `__pycache__`/`.pyc` files in the plugin directory (#74). The payload digest now ignores them, like the installer does.
+- AI: the agents usage updater waits up to 300 s instead of 120 s for the Omarchy collectors. Large Codex session histories (tens of GB) made the Codex collector exceed 120 s, so the Codex card vanished from the AI panel after 24 h.
+- Tests: the notification adapter smoke test no longer races its timer (the test that made one release job red in 16.1).
+- Bar: the bar's fallback colours now reference the palette as `Commons.Color`, as Omarchy requires for Qt 6.12, where an unqualified `Color` resolves to the new QtQuick type (basecamp/omarchy #14553).
+- Bar: the hidden-bar probe accepts Omarchy's upcoming `bar-hidden` toggle marker next to the current `bar-off` (basecamp/omarchy #14395).
+
+### Known issues
+
+- Rings style: right after a bar rebuild (reload, V1/V2 switch, workspace count change) the focus ring can be drawn about 6 px off for a single frame (16 ms); on our fixture this happened in up to every second rebuild in the standard layout and in 1 of 10 in the full layout. It is a build-time animation ordering effect and will be fixed with the host layout redesign in 0.2.0.
+- Notch bar at DPR 1.6 with the numbers or kanji style: the centre group can oscillate between two layouts for a while after a layout change. This exists since 16.1 (status spacing feedback) and is also addressed by the 0.2.0 redesign.
+
+## [0.1.1-beta.16.1] - 2026-10-04
+
+### Fixed
+
+- Turn Bluetooth on after an rfkill soft block, and off again, through
+  Omarchy's power helper (#68). Ignore repeat clicks while a power request
+  is pending instead of dispatching a reverse action.
+- Raise the smaller date beside the clock again, as before Beta.16.
+- Show the update count beside the update icon instead of in a badge, and remove
+  the tray count badge. Both counts remain in the tooltips; vertical bars show
+  the update count only there.
+- Restore application icons for pinned tray apps, with a fallback when no icon is available.
+- Restore the selected launcher logo, including Omarchy, Shibumi, and Dragon, without symbol remapping.
+- Render the OpenCode usage mark crisply at the size of the other provider icons, so its usage fill reads clearly.
+
+### Changed
+
+- Admit the exact Beta.16 tag and merge checkouts as update predecessors,
+  retaining strict payload and lifecycle checks.
+
+## [0.1.1-beta.16] - 2026-10-02
+
+### Added
+
+- Offer horizontal and vertical battery symbols in the bar.
+- Explain unavailable AI provider limits in the widget tooltip.
+- Admit the exact Beta.15.4 tag, release merge, and documentation merge
+  checkouts as update predecessors, retaining strict payload and lifecycle
+  checks.
+
+### Changed
+
+- Combine CPU and GPU load in one concentric water-ring display in the CPU
+  panel, with GPU information shown when available.
+- Refresh the Battery and Temperature panels with water-ring displays and
+  compact metrics; show a plasma effect while the battery is charging.
+- Arrange Power Profile choices as native buttons with distinct active and
+  hover states.
+- Use Omarchy's configured bar font and shared icon size for bar symbols,
+  with optically balanced LAN, palette, and power-profile symbols.
+- Align ordinary bar text on a shared font-reference baseline; the smaller
+  date follows the clock's baseline without changing its text size.
+- Use an outline notification bell with a theme color01 dot for a positive
+  count and a ring while the count is unknown or loading.
+- Make update and tray badges smaller, center single digits, and let longer
+  counts grow to the right.
+- Use the theme's color01 for the horizontal battery's charging bolt.
+- Align the horizontal V2 battery symbol to its displayed value's baseline.
+- Use a consistent uppercase heading style across feature panels, leaving
+  the Control Center heading unchanged.
+- Use the accent color for AI model-usage bars.
+- Remove the redundant LIVE marker from the Control Center's active-bar card.
+- Show the output name in the desktop Brightness widget; Compact and V2 Icon
+  modes show only the monitor symbol.
+
+### Fixed
+
+- Show the selected theme's actual colors in picker palette dots.
+- Keep bar symbols and text centered without changing their layout or input
+  reservations, and draw the battery tip, charge bolt, and vertical text cleanly.
+- Refresh glyph outline metrics after switching from V1 to V2 without a shell
+  restart, so the horizontal battery no longer sits too low.
+- Make the five media transport buttons compact, with equally sized,
+  centered symbols.
+- Let V1 and V2 shadows fade beyond the bar edge without expanding the input
+  region or reserved screen space; match the straight edge to the outline.
+- Keep Power Profile labels readable during hover transitions and clear the
+  hover when the pointer leaves. Profile buttons and the Brightness text-size
+  control now follow the panel radius.
+- Enable V1 widgets already present as ordinary layout entries. Reuse empty
+  base positions whose owner is elsewhere and slots held by switched-off
+  additional widgets before refusing placement. Preserve displaced fixed
+  widget identities and settings, never displace active widgets, and show a
+  clear capacity message when no place is free.
+
+## [0.1.1-beta.15.4] - 2026-09-28
+
+### Added
+
+- Show reported AI limit windows with reset countdowns and pace, a seven-day
+  token chart, and the provider's plan name when available.
+- Show the CPU model and load averages when the CPU panel opens, and optional
+  RAM type and speed in MT/s when the Memory panel opens.
+- Add player-supported Shuffle, Repeat, and seek controls to the media panel.
+- Count notifications without opening the panel, group them by app, show
+  relative times, and focus an existing app window from a Recent entry.
+- Admit the exact Beta.15.3 tag and merge checkout revisions as update
+  predecessors while preserving strict payload and lifecycle checks.
+
+### Changed
+
+- Use consistent text roles in the compact AI panel.
+- Arrange CPU and Memory metrics around water-filled load rings. Remove the
+  CPU panel history chart while retaining the bar's history.
+- Show the GPU row only after reported activity and retain it while idle;
+  use "CPU · GPU" as the title only while the row is visible.
+- Arrange the five media buttons in one row and make buttons in the
+  redesigned panels follow the panel radius.
+- Omit the notification tooltip's Live section when the host exposes no
+  Live model; keep Recent counts and Do Not Disturb status.
+- Show AI token counts in compact K/M/B units, matching Omarchy.
+- Animate the water rings in the CPU and Memory panels while a panel is
+  open.
+
+### Fixed
+
+- Keep the AI usage value visible when a slow provider refresh exceeds its
+  time limit, and mark usage older than two refresh intervals as stale in
+  the panel.
+- Bind Live notification actions to the exact current row and reject stale
+  clicks after replacement or reordering.
+- Keep Hearthstone picker card titles sharp during transforms.
+- Keep the Health page visible in the compact Control Center.
+
+### Validation
+
+- Pin the final 24-plugin Beta.15.4 payload and package identity without
+  inventing future tag or merge revisions.
+- Add a Beta.15.3 tag-checkout update arm to the isolated Quattro runtime
+  fixture, retaining the existing package, fresh-install, Beta.15, and
+  Beta.15.2 arms and their lifecycle checks.
+- Cover the changed panels, lazy telemetry reads, notification counts and
+  actions with scoped regressions. Keep restrictive-umask fixtures independent
+  of the caller's umask.
+
+## [0.1.1-beta.15.3] - 2026-09-26
+
+### Fixed
+
+- Admit exact Beta.15, Beta.15.1 (tagged but not released), and Beta.15.2
+  checkout tag and merge revisions as update predecessors while retaining the
+  existing package, payload-integrity, and transactional admission checks.
+- Keep the Shibumi bar layout, including the placement of third-party widgets,
+  across `uninstall --keep-settings` and a later install, and never add a
+  third-party widget twice when importing or restoring the stock bar.
+- Treat plugin helper scripts as executable whenever their owner may execute
+  them, so source checkouts cloned with a restrictive `umask` keep a stable
+  payload identity and can be updated.
+- Avoid a Network widget error in the shell log when the shell stops with the
+  Network panel open, for example during uninstall.
+
+### Validation
+
+- Pin the separate Omarchy 4.0.4 package and source baselines for the candidate
+  host gates; retain historical 4.0.3 evidence. Isolate workspace fixture
+  configuration so a local font preference does not alter test geometry.
+
+## [0.1.1-beta.15.2] - 2026-09-21
+
+### Changed
+
+- Increased each release-evidence gate's process-group timeout from 15 to 30
+  minutes while retaining the existing fail-closed evidence controls.
+
+### Fixed
+
+- Made the Quattro source-update and fresh-install arms read the candidate
+  version from `VERSION` instead of retaining a stale Beta.15 expectation.
+
+## [0.1.1-beta.15.1] - 2026-09-21
+
+### Fixed
+
+- Health recognizes detached checkouts at exact release tags and reports
+  their clean or dirty status without requiring a branch upstream.
+
+## [0.1.1-beta.15] - 2026-09-20
+
+### Added
+
+- Added a positional V1 split between G8 and the optional second center slot;
+  Edit slots, Split all, and Merge all use the existing split interaction.
+- Added explicit plugin-capacity feedback when an installed widget cannot yet
+  be placed in the active layout.
+
+### Changed
+
+- Health now reads the exact selected Quickshell instance log through a bounded,
+  no-follow file path. The Control Center headline and panel list only findings
+  attributed to Shibumi; CLI and JSON reports retain the complete owner-labelled
+  result.
+- The Control Center acquires plugin-catalog data only when needed and constructs
+  the widget palette only while it is open.
+- The V2 editor description now states that edit mode supports slots, dividers,
+  and drag.
+- Kept the horizontal bar window edge-local and bar-height in every presentation
+  and in edit mode without changing its exclusive zone. Dimming and outside-click
+  dismissal now use a dedicated output-local edit backdrop; drag geometry is
+  translated once into output coordinates and cancels if output geometry changes.
+- Removed the former WidgetSlot measurement and geometry-repair layer so hosted
+  panel providers retain ownership of content height and card placement. Bounded
+  surface discovery, shared chrome bindings, and the V2 connector remain.
+
+### Fixed
+
+- Kept the V1 editing frame, including its border stroke, within the bar-high
+  window at both top and bottom.
+- Restored the stock predecessor instead of recording Shibumi as its own
+  predecessor when adopting an orphaned Shibumi selection, while preserving
+  settings and post-stop ownership changes.
+- Bound published Beta.14.1 package fixtures to the published payload, covered
+  source-checkout updates, isolated fixture runtime state, and rejected unknown
+  payload drift during update and repair.
+- Kept Control Center page restoration on the current output-local owner across
+  presentation rebuilds, stopped redundant registry reads, and retained Quick
+  controls while switching presentations.
+- Allowed neutrally configured optional Shibumi widgets to be re-enabled in V1.
+- Guarded the Network traffic consumer when its service disappears and routed
+  Notifications, Do Not Disturb, and Idle through the scoped suite host facade.
+- Restored the embedded system-update widget on scoped hosts.
+- Removed uninstalled third-party widgets from saved and lifecycle-written
+  layouts while preserving enabled, installed third-party bar widgets already
+  present in the current layout, including their layout settings, when switching
+  profiles.
+- Preserved placeable widgets during partial background reconciliation, kept
+  widgets in in-flight transitions out of the extra deck, and placed V2 plugin
+  groups into available fallback regions when their preferred region is full.
+- Prevented a moved single-instance widget from loading in its new slot before
+  the previous owner is destroyed.
+- Restored Recent notification history on hosts that expose DND and host-owned
+  history but no popup model. The unavailable Live tab stays hidden, and Recent
+  supports per-entry dismissal and clear-history through validated host history
+  filenames.
+- Detached host-registered widgets before loader teardown and restored each bar
+  reference only for its admitted submission, so hosted widgets no longer call
+  functions on a bar whose loader context is gone. Network reads one service
+  snapshot per derived binding, and Status detaches click-registered children
+  without unregistering against a bar that is tearing down.
+
+### Notes
+
+- Basecamp refresh is unavailable under Shibumi on the pinned Omarchy 4.0.3
+  host: the plugin has no widget-local service fallback, and the host does not
+  expose its shared service to replacement bars.
+- In edit mode, empty V1 slots are interactive; click the desktop or press
+  Escape to leave edit mode.
+
+- Quickshell can log `Failed to register with host portal … Connection already
+  associated with an application ID` once per shell start. The message appears
+  with and without Shibumi installed; Health does not list it, while
+  `shibumi-health` retains its owner-labelled record.
+- On the pinned Omarchy 4.0.3 host, unused `omarchy.bar` handler warnings can
+  already be present while Shibumi is active. They remain separate host-warning
+  evidence, are not attributed as fixed by the hosted-widget teardown changes,
+  and are not a general allowance for duplicate IPC ownership.
+- Older Shibumi readers ignore `splits.center` and can drop it when rewriting
+  layout state; current readers migrate a missing field to disabled without a
+  settings-schema version bump.
+
 ## [0.1.1-beta.14.1] - 2026-09-16
 
 Same product behavior as Beta.14; only version constants changed in the

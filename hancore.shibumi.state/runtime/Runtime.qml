@@ -3,6 +3,7 @@ pragma Singleton
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "." as Local
 
 // Cooperative suite wiring, not a QML security boundary. Native backends and
 // their workers stay in their existing service owners. No host discovery here.
@@ -10,7 +11,7 @@ QtObject {
   id: runtime
 
   readonly property int contractVersion: 1
-  readonly property string suiteVersion: "0.1.1-beta.14.1"
+  readonly property string suiteVersion: "0.2.5"
   readonly property var providerIds: [
     "hancore.shibumi.state", "hancore.shibumi.control-center",
     "hancore.shibumi.reactor", "hancore.shibumi.telemetry",
@@ -96,7 +97,7 @@ QtObject {
   property IpcHandler visibilityIpc: IpcHandler {
     enabled: runtime.visibilityIpcArmed
       && runtime.visibilityBarOwner !== null
-    target: "omarchy.bar"
+    target: Local.HostContract.ipcTargets.bar
 
     function syncHidden(): void {
       const owner = runtime.visibilityBarOwner
@@ -304,8 +305,7 @@ QtObject {
     hostRegistryPrimeDeadline.interval = hostRegistryPrimeTimeoutMs
     hostRegistryPrimeDeadline.restart()
     hostRegistryPrimeProcess.command = [
-      "/usr/bin/quickshell", "ipc", "--pid", String(pid),
-      "call", "--", "shell", "rescanPlugins"
+      "/usr/bin/quickshell", "ipc", "--pid", String(pid), "show"
     ]
     hostRegistryPrimeProcess.running = true
     return false
@@ -390,11 +390,29 @@ QtObject {
 
   property Process hostRegistryPrimeProcess: Process {
     running: false
+    stdout: StdioCollector {
+      id: hostRegistryPrimeOutput
+      waitForEnd: true
+    }
     onExited: function(exitCode, _exitStatus) {
       if (runtime.hostRegistryPrimePhase !== "dispatching") return
       if (exitCode !== 0) {
         runtime.observeHostRegistryPrime("native-rescan-refused")
         runtime.failHostRegistryPrime(false)
+        return
+      }
+      if (command[4] === "show") {
+        // Drain the probe before reusing this Process; the deadline keeps running.
+        Qt.callLater(function() {
+          if (runtime.hostRegistryPrimePhase !== "dispatching") return
+          const shell = /^target shell\n((?:[ \t]+.*\n?)*)/m.exec(hostRegistryPrimeOutput.text)
+          const call = shell && /^[ \t]+function reloadPlugins\(\): void[ \t]*$/m.test(shell[1])
+            ? ["shell", "reloadPlugins"] : ["shell", "rescanPlugins"]
+          runtime.hostRegistryPrimeProcess.command = [
+            "/usr/bin/quickshell", "ipc", "--pid", String(runtime.hostRegistryPrimePid),
+            "call", "--"].concat(call)
+          runtime.hostRegistryPrimeProcess.running = true
+        })
         return
       }
       runtime._hostRegistryPrimeAcknowledged = true
@@ -497,7 +515,7 @@ QtObject {
 
   function firstPartyServiceFor(id) {
     const key = String(id || "")
-    if (["omarchy.idle", "omarchy.media", "omarchy.notifications"].indexOf(key) < 0) return null
+    if (!Local.HostContract.isFirstPartyService(key)) return null
     const lease = _selected("hancore.shibumi.bar")
     return lease && typeof lease.host.firstPartyServiceFor === "function"
       ? lease.host.firstPartyServiceFor(key) : null

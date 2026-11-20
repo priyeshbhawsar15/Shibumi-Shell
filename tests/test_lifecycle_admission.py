@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from shibumi_suite.admission import (  # noqa: E402
     AdmissionError,
+    UnsupportedInstallIdentity,
     JOURNAL_SCHEMA_VERSION,
     MAX_PREDECESSOR_STATES,
     classify_install_state,
@@ -176,6 +177,73 @@ class LifecycleAdmissionTests(unittest.TestCase):
                 json.dumps(marker) + "\n", encoding="utf-8"
             )
 
+    def materialize_beta141_payload_drift(
+        self, revision: str
+    ) -> tuple[dict[str, object], Path]:
+        if self.paths.plugin_dir.exists():
+            shutil.rmtree(self.paths.plugin_dir)
+        state_path = self.paths.state_dir / "install.json"
+        state_path.unlink(missing_ok=True)
+
+        identity = next(
+            item for item in self.identities if item["id"] == "public-beta.14.1"
+        )
+        beta141_revision = "7a6c853b1947d303bad9a5b640c224c01b669106"
+        beta141_digest = (
+            "0350a8f66d81dc640b6d268ace149620ae78c40aea13ad2cd507ad6de93d8de3"
+        )
+        self.assertIn(beta141_revision, identity["sourceRevisions"])
+        self.assertEqual(identity["payloadDigest"], beta141_digest)
+
+        state = self.state_for(identity, revision)
+        for plugin_id in state["plugins"]:
+            shutil.copytree(
+                self.suite.plugins[plugin_id].source,
+                self.paths.plugin_dir / plugin_id,
+            )
+        changed_payload = (
+            self.paths.plugin_dir
+            / str(state["plugins"][0])
+            / "manifest.json"
+        )
+        changed_payload.write_bytes(
+            changed_payload.read_bytes() + b"\n// deterministic debug overlay\n"
+        )
+
+        actual_plugin_digests = {
+            str(plugin_id): self.suite.plugins[str(plugin_id)].payload_digest(
+                self.paths.plugin_dir / str(plugin_id)
+            )
+            for plugin_id in state["plugins"]
+        }
+        actual_suite_digest = suite_payload_digest(actual_plugin_digests)
+        self.assertNotEqual(actual_suite_digest, beta141_digest)
+        state["pluginDigests"] = actual_plugin_digests
+        state["payloadDigest"] = actual_suite_digest
+        self.write_state(state)
+
+        transaction = "1700000000-1-14114114"
+        for plugin_id in state["plugins"]:
+            target = self.paths.plugin_dir / str(plugin_id)
+            marker = {
+                "schemaVersion": 1,
+                "suiteId": "hancore.shibumi",
+                "suiteVersion": state["suiteVersion"],
+                "pluginId": plugin_id,
+                "sourceRevision": revision,
+                "payloadDigest": actual_plugin_digests[str(plugin_id)],
+                "suitePayloadDigest": actual_suite_digest,
+                "transaction": transaction,
+            }
+            (target / ".shibumi-managed.json").write_text(
+                json.dumps(marker) + "\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                self.suite.plugins[str(plugin_id)].payload_digest(target),
+                actual_plugin_digests[str(plugin_id)],
+            )
+        return state, changed_payload
+
     def write_journal(
         self, token: str, journal: dict[str, object], *, prefix: str = ""
     ) -> Path:
@@ -197,6 +265,23 @@ class LifecycleAdmissionTests(unittest.TestCase):
             "fork-gaming-visualizer-pause",
             "fork-registry-prime",
             "fork-widget-settings",
+            "fork-notch-width",
+            "public-beta.15",
+            "public-beta.15.1",
+            "public-beta.15.2",
+            "public-beta.15.3",
+            "public-beta.15.4",
+            "public-beta.16",
+            "public-0.2.0",
+            "public-0.2.1",
+            "source-0.2.1",
+            "public-0.2.2",
+            "source-0.2.2",
+            "public-0.2.3",
+            "source-0.2.3",
+            "public-0.2.4",
+            "source-0.2.4",
+            "public-0.2.5",
         ):
             identity = next(
                 item for item in self.identities if item["id"] == identity_id
@@ -222,6 +307,72 @@ class LifecycleAdmissionTests(unittest.TestCase):
             classify_install_state(migrated, self.suite, self.identities),
             "step-5-tip",
         )
+
+    def test_published_beta15_checkout_revisions_keep_exact_identity(self) -> None:
+        published = {
+            "public-beta.15": (
+                "4e91c26ebf4da07476d4be6176f29d7662fed9c1",
+                "91b2cd0f886c15962a2627aea3269f4c09cae828",
+                "7c0499289c48b9f4b3dfd28687a23824e752f15d",
+                "package:0.1.1-beta.15",
+            ),
+            "public-beta.15.1": (
+                "36e4b9f0de428c17248d40592461a9e3f3f750f8",
+                "533110d7abda296b56369f304a618f9313e1f12f",
+                "package:0.1.1-beta.15.1",
+            ),
+            "public-beta.15.2": (
+                "c45af77c8333b691ac36522247b6e5b5481a3666",
+                "aaf7611d66ed5f99078fc5419bc3ba4db6164bed",
+                "package:0.1.1-beta.15.2",
+            ),
+            "public-beta.15.3": (
+                "5b1d21f0cea73bb9e7997278a828b3ef295e6c94",
+                "db579163a4b1004a7cc09ee565cac616db9ff627",
+                "package:0.1.1-beta.15.3",
+            ),
+            "public-beta.15.4": (
+                "6594b989c9f5edfe557669b0413a9bd3e50f8e81",
+                "67d87c5d7f61fca4b05e79a089238805e0e0737f",
+                "81f6bcd28cf0e0b5c435761150b2b73083f1e4fa",
+                "package:0.1.1-beta.15.4",
+            ),
+            "public-beta.16": (
+                "4840482ec0e06a2ebd478120833d4fae1f30889e",
+                "05548c8d9ffdf0d37962d6e423e2a0dc21b8cd91",
+                "package:0.1.1-beta.16",
+            ),
+            "public-0.2.0": (
+                "795eae8608e0cff691880e26f159bbc3dc779a8f",
+                "fe7da3042582b9ab0deea4540db16f6b856a4a51",
+                "5c14ced12cc3c64c4be23dd8082a9ab467b7ee4c",
+                "package:0.2.0",
+            ),
+        }
+        for identity_id, revisions in published.items():
+            identity = next(
+                item for item in self.identities if item["id"] == identity_id
+            )
+            self.assertEqual(identity["sourceRevisions"], list(revisions))
+            for revision in revisions:
+                with self.subTest(identity=identity_id, revision=revision):
+                    state = self.state_for(identity, revision)
+                    self.assertEqual(
+                        classify_install_state(state, self.suite, self.identities),
+                        identity_id,
+                    )
+                    wrong_revision = dict(state, sourceRevision="0" * 40)
+                    with self.assertRaises(AdmissionError):
+                        classify_install_state(
+                            wrong_revision, self.suite, self.identities
+                        )
+                    wrong_digest = dict(state, payloadDigest="0" * 64)
+                    with self.assertRaisesRegex(
+                        AdmissionError, "revision/digest identity"
+                    ):
+                        classify_install_state(
+                            wrong_digest, self.suite, self.identities
+                        )
 
     def test_predecessor_contract_parser_is_exact_and_bounded(self) -> None:
         contract = json.loads(
@@ -325,6 +476,70 @@ class LifecycleAdmissionTests(unittest.TestCase):
         with self.assertRaisesRegex(AdmissionError, "revision/digest identity"):
             classify_install_state(mixed, self.suite, self.identities)
 
+    def test_update_rejects_beta141_same_revision_honest_payload_drift(self) -> None:
+        beta141_revision = "7a6c853b1947d303bad9a5b640c224c01b669106"
+        for revision in (beta141_revision, f"{beta141_revision}-dirty"):
+            with self.subTest(revision=revision):
+                state, changed_payload = self.materialize_beta141_payload_drift(
+                    revision
+                )
+                state_before = (self.paths.state_dir / "install.json").read_bytes()
+                payload_before = changed_payload.read_bytes()
+
+                with self.assertRaises(UnsupportedInstallIdentity) as raised:
+                    preflight_lifecycle_state(
+                        self.paths,
+                        self.suite,
+                        allow_payload_repair=False,
+                    )
+
+                self.assertEqual(
+                    raised.exception.diagnostic["sourceRevision"], revision
+                )
+                self.assertEqual(
+                    raised.exception.diagnostic["suitePayloadDigest"],
+                    state["payloadDigest"],
+                )
+                self.assertIn("revision/digest identity", str(raised.exception))
+                self.assertIn("no recovery or mutation", str(raised.exception))
+                self.assertEqual(
+                    (self.paths.state_dir / "install.json").read_bytes(),
+                    state_before,
+                )
+                self.assertEqual(changed_payload.read_bytes(), payload_before)
+
+    def test_repair_rejects_beta141_same_revision_honest_payload_drift(self) -> None:
+        beta141_revision = "7a6c853b1947d303bad9a5b640c224c01b669106"
+        for revision in (beta141_revision, f"{beta141_revision}-dirty"):
+            with self.subTest(revision=revision):
+                state, changed_payload = self.materialize_beta141_payload_drift(
+                    revision
+                )
+                state_before = (self.paths.state_dir / "install.json").read_bytes()
+                payload_before = changed_payload.read_bytes()
+
+                with self.assertRaises(UnsupportedInstallIdentity) as raised:
+                    preflight_lifecycle_state(
+                        self.paths,
+                        self.suite,
+                        allow_payload_repair=True,
+                    )
+
+                self.assertEqual(
+                    raised.exception.diagnostic["sourceRevision"], revision
+                )
+                self.assertEqual(
+                    raised.exception.diagnostic["suitePayloadDigest"],
+                    state["payloadDigest"],
+                )
+                self.assertIn("revision/digest identity", str(raised.exception))
+                self.assertIn("no recovery or mutation", str(raised.exception))
+                self.assertEqual(
+                    (self.paths.state_dir / "install.json").read_bytes(),
+                    state_before,
+                )
+                self.assertEqual(changed_payload.read_bytes(), payload_before)
+
     def test_shared_version_with_wrong_revision_or_digest_is_rejected(self) -> None:
         identity = next(
             item for item in self.identities if item["id"] == "step-5-tip"
@@ -411,11 +626,22 @@ class LifecycleAdmissionTests(unittest.TestCase):
             ),
             "oversized": oversized,
         }
-        expected = (
+        refusal = (
             "shibumi-suite: status admission refused; malformed, unsafe, "
             "ambiguous, or unsupported state was not inspected further; "
             "no recovery or mutation was attempted\n"
         )
+
+        def expected_refusal() -> str:
+            # Status forwards the preflight reason, not the refused document.
+            # Keep exact-output and all existing redaction/read-only assertions.
+            try:
+                preflight_lifecycle_state(self.paths, self.suite)
+            except AdmissionError as error:
+                reason = str(error).replace(str(self.paths.state_dir), "<state>")
+                return refusal + f"shibumi-suite: refusal reason: {reason}\n"
+            return refusal
+
         for name, payload in cases.items():
             with self.subTest(name=name):
                 state_path.write_bytes(payload)
@@ -423,6 +649,7 @@ class LifecycleAdmissionTests(unittest.TestCase):
                 stderr = io.StringIO()
                 with redirect_stdout(stdout), redirect_stderr(stderr):
                     result = command_status_with_admission(self.suite, self.paths)
+                expected = expected_refusal()
                 self.assertEqual(result, 1)
                 self.assertEqual(stdout.getvalue(), "")
                 self.assertEqual(stderr.getvalue(), expected)
@@ -433,6 +660,7 @@ class LifecycleAdmissionTests(unittest.TestCase):
                 state_path.unlink()
 
         state_path.symlink_to(external)
+        expected = expected_refusal()
         stdout = io.StringIO()
         stderr = io.StringIO()
         with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -1425,6 +1653,10 @@ class LifecycleAdmissionTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AdmissionError, "marker or payload"):
             preflight_lifecycle_state(self.paths, self.suite)
+        refused = io.StringIO()
+        with redirect_stderr(refused), patch("shibumi_suite.cli.command_status", side_effect=AssertionError("refused state inspected again")):
+            result = command_status_with_admission(self.suite, self.paths)
+        self.assertEqual((result, f"Locally modified: {first}" in refused.getvalue()), (1, True))
         self.assertEqual(
             preflight_lifecycle_state(
                 self.paths, self.suite, allow_payload_repair=True

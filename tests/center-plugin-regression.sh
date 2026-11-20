@@ -49,10 +49,16 @@ python3 "$repo_root/tests/weather-panel-control-regression.py" --host-shell "$om
 mkdir -p "$tmpdir/runtime"
 chmod 700 "$tmpdir/runtime"
 shibumi_stage_suite_runtime "$repo_root" "$tmpdir"
+mkdir -p "$tmpdir/hancore.shibumi.bar"
+install -Dm0644 "$repo_root/hancore.shibumi.bar/core/GroupRegistry.js" \
+  "$tmpdir/hancore.shibumi.bar/core/GroupRegistry.js"
+cp -a -- "$repo_root/hancore.shibumi.bar/services" \
+  "$tmpdir/hancore.shibumi.bar/services"
 cp -a -- "$repo_root/hancore.shibumi.center" "$tmpdir/center"
 cp -a -- "$omarchy_path/shell/Commons" "$tmpdir/Commons"
 cp -a -- "$omarchy_path/shell/Ui" "$tmpdir/Ui"
 install -m 0644 "$repo_root/tests/center-plugin-smoke.qml" "$tmpdir/shell.qml"
+install -m 0644 "$repo_root/tests/center-reveal-budget.qml" "$tmpdir/"
 install -m 0644 "$repo_root/tests/fixtures/CenterTestCalendar.qml" \
   "$tmpdir/CenterTestCalendar.qml"
 install -m 0644 "$repo_root/tests/fixtures/WeatherPanelTestView.qml" \
@@ -259,7 +265,7 @@ for location_contract in \
   rg -Fq "$location_contract" "$weather_panel" \
     || fail "weather location contract missing: $location_contract"
 done
-rg -q 'registered(Source|Component)\("omarchy\.system-update"\)' "$center_widget" \
+rg -Fq 'embed.resolveComponent("hancore.shibumi.center", "omarchy.system-update")' "$center_widget" \
   || fail "center does not retain the official update action owner"
 if rg -U -q 'onLoaded: \{[^}]*root\.scheduleOfficialSync' "$center_widget"; then
   fail "loaded center children recursively reschedule their own loaders"

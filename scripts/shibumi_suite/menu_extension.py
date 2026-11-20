@@ -8,6 +8,14 @@ class MenuExtensionError(RuntimeError):
     pass
 
 
+class StockMenuError(MenuExtensionError):
+    """The host defaults, not the user's extension, failed validation."""
+
+    def __init__(self, message: str, *, unparsable: bool = False):
+        super().__init__(message)
+        self.unparsable = unparsable
+
+
 START_MARKER = "// shibumi-picker-routing-start"
 END_MARKER = "// shibumi-picker-routing-end"
 EMPTY_EXTENSION = "{\n}\n"
@@ -184,14 +192,60 @@ def remove_picker_routing(raw: str) -> str:
     line_end = raw.find("\n", end + len(END_MARKER))
     line_end = len(raw) if line_end < 0 else line_end + 1
     result = raw[:line_start] + raw[line_end:]
-    _decoded(result)
+    try:
+        _decoded(result)
+    except MenuExtensionError as error:
+        decoder = error.__cause__
+        if isinstance(decoder, json.JSONDecodeError):
+            # Diagnostics name the on-disk file, not the shorter intermediate
+            # string after removing our generated block. Acceptance is unchanged.
+            position = decoder.pos + (line_end - line_start if decoder.pos >= line_start else 0)
+            original = json.JSONDecodeError(decoder.msg, raw, position)
+            raise MenuExtensionError(f"invalid Omarchy menu extension JSONC: {original}") from original
+        raise
     return result
 
 
-def install_picker_routing(raw: str | None) -> str:
+def preflight_picker_removal(raw: str) -> None:
+    _decoded(raw)
+    remove_picker_routing(raw)
+
+
+def install_picker_routing(
+    raw: str | None, stock_menu: str | None = None, *, warnings: list[str] | None = None
+) -> str:
+    # Default actions are the stable host contract. The lifecycle supplies the
+    # actual host menu so forward hosts retain their native theme-picker route.
     base = raw if raw and raw.strip() else EMPTY_EXTENSION
     base = remove_picker_routing(base)
     decoded = _decoded(base)
+    family = "style"
+    stock_actions = {
+        "theme": 'theme=$(omarchy-theme-switcher); [[ -n $theme ]] && omarchy-theme-set "$theme"',
+        "background": 'background=$(omarchy-theme-bg-switcher); [[ -n $background ]] && omarchy-theme-bg-set "$background"',
+    }
+    if stock_menu is not None:
+        try:
+            stock = _decoded(stock_menu)
+        except MenuExtensionError as error:
+            raise StockMenuError(str(error), unparsable=True) from error
+        stock = stock.get("items", stock)
+        if isinstance(stock, dict) and "style.theme" in stock:
+            family = "style"
+        elif isinstance(stock, dict) and "appearance.theme" in stock:
+            family = "appearance"
+        else:
+            if warnings is not None:
+                warnings.append("stock menu has neither style.theme nor appearance.theme; picker routing skipped")
+            return base
+        for suffix in stock_actions:
+            key = f"{family}.{suffix}"
+            entry = stock.get(key)
+            action = entry.get("action") if isinstance(entry, dict) else None
+            if not isinstance(action, str) or not action.strip():
+                raise StockMenuError(f"Omarchy stock menu has no action for {key} (family {family})")
+            stock_actions[suffix] = action
+    theme_key, background_key = f"{family}.theme", f"{family}.background"
     root_start, root_end = _root_object(base)
     items = decoded.get("items")
     target = _items_object(base, root_start, root_end) if isinstance(items, dict) else None
@@ -215,17 +269,17 @@ def install_picker_routing(raw: str | None) -> str:
     has_trailing_comma = cursor > target_start and untrimmed[cursor] == ","
     separator = indent + ",\n" if target_value and not has_trailing_comma else ""
     entries = {
-        "style.theme": {
+        theme_key: {
             "icon": "󰸌",
             "label": "Theme",
             "aliases": ["theme", "themes"],
-            "action": f"{ROUTER} theme",
+            "action": f'if [[ -x {ROUTER} ]]; then {ROUTER} theme; else {stock_actions["theme"]}; fi',
         },
-        "style.background": {
+        background_key: {
             "icon": "",
             "label": "Background",
             "aliases": ["background", "wallpaper"],
-            "action": f"{ROUTER} wallpaper",
+            "action": f'if [[ -x {ROUTER} ]]; then {ROUTER} wallpaper; else {stock_actions["background"]}; fi',
         },
     }
     block = (
@@ -235,17 +289,17 @@ def install_picker_routing(raw: str | None) -> str:
         + "\n"
         + separator
         + indent
-        + json.dumps("style.theme")
+        + json.dumps(theme_key)
         + ": "
         + json.dumps(
-            entries["style.theme"], ensure_ascii=False, separators=(",", ":")
+            entries[theme_key], ensure_ascii=False, separators=(",", ":")
         )
         + ",\n"
         + indent
-        + json.dumps("style.background")
+        + json.dumps(background_key)
         + ": "
         + json.dumps(
-            entries["style.background"],
+            entries[background_key],
             ensure_ascii=False,
             separators=(",", ":"),
         )

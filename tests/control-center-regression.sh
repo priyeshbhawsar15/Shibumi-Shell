@@ -35,7 +35,52 @@ install -Dm0644 "$repo_root/tests/fixtures/PluginUpdateTestService.qml" \
 install -Dm0755 "$repo_root/tests/fixtures/slow-health-report" \
   "$tmpdir/home/.config/omarchy/plugins/hancore.shibumi.control-center/manager/shibumi-health"
 mkdir -m 700 "$tmpdir/runtime"
+"$repo_root/tests/panel-window-geometry-regression.sh" \
+  --stage-control-center "$tmpdir/control"
 
+/usr/bin/python3 -I - "$repo_root" "$tmpdir/v1-layout-noop.qml" <<'PY'
+import sys
+from pathlib import Path
+panel = (Path(sys.argv[1]) / "hancore.shibumi.control-center/ControlCenterPanel.qml").read_text()
+bar = (Path(sys.argv[1]) / "hancore.shibumi.bar/Bar.qml").read_text()
+owner = (Path(sys.argv[1]) / "hancore.shibumi.control-center/BarWidget.qml").read_text()
+owner_methods = owner[owner.index("  readonly property var nativeSections:"):owner.index("  readonly property var tokens:")]
+methods = panel[panel.index("  function setPluginEnabled("):panel.index("  function setPluginBarWidgetEnabled(")]
+methods += panel[panel.index("  function shibumiWidgetGroup("):panel.index("  function widgetInstalled(")]
+methods += ''.join(bar[bar.index('  function ' + start + '('):bar.index('  function ' + end + '(')] for start, end in [('layoutEntries', 'deduplicatedUnassignedEntries'), ('layoutContains', 'hasBarWidgetEntryPoint'), ('entryId', 'entrySettings')])
+Path(sys.argv[2]).write_text('''import QtQuick
+import Quickshell
+import qs.Commons
+import qs.Commons as Commons
+import "hancore.shibumi.state/runtime" as SuiteRuntime
+import "BAR_CORE/GroupRegistry.js" as GroupRegistry
+import "BAR_CORE/LayoutModel.js" as LayoutModel
+QtObject { id: root
+  readonly property var ownerWidget: root
+  property bool nativeCatalogRequired: false; property bool v2LayoutActive: false; property string pluginActionError: ""
+  property var pluginRegistry: ({installedPlugins: {}, setEnabled: function() { return false }})
+  property var layout: []; property var groups: ({}); property int layoutWrites: 0
+  property var bar: root; readonly property var layoutConfig: ({left: [], center: [], right: layout}); property var layoutStateController: ({v2Mode:false, groupLocation: function(group) { return GroupRegistry.configuredEntry(root.layoutConfig, GroupRegistry.dynamicModuleIdForGroup(group)) !== null ? {region:"right"} : null }})
+  function setPluginBarWidgetEnabled(id, on, section) { layoutWrites++; return false }
+  function groupEnabled(group) { return groups[group] === true }
+  function setGroupEnabled(group, on, coalesce) { groups[group] = on; return true }
+  Component.onCompleted: Qt.callLater(function() {
+    const order = {left:["G1","G2","G3","G4","G5","G6","G:37signals.hey","G:hancore.omaq","G:hancore.shibumi.gpu"],center:["G8","G7"],right:["G9","G10","G11","G14","G12","G13","","G15","G:37signals.basecamp"]}
+    const ids = ["hancore.omaq","37signals.basecamp","37signals.hey","hancore.shibumi.gpu","hancore.shibumi.temperature"]
+    const vacated = LayoutModel.reconcilePluginGroups(order, LayoutModel.resizeSplits(LayoutModel.defaultSplits(), order), ids.map(id => ({pluginId:id,region:"right"})), ["G:hancore.shibumi.gpu"])
+    const expectedBase = LayoutModel.copyOrder(order); expectedBase.right[6] = "G:hancore.shibumi.temperature"
+    if (!vacated || vacated.unplaced.length || JSON.stringify(vacated.order) !== JSON.stringify(expectedBase) || JSON.stringify(vacated.splits) !== JSON.stringify(LayoutModel.resizeSplits(LayoutModel.defaultSplits(), order))) { console.error("P14 vacated Bluetooth base must precede inactive extra reclamation"); Qt.exit(1); return }
+    order.right[6] = "G:hancore.shibumi.storage"; ids.push("hancore.shibumi.storage")
+    const fixed = LayoutModel.reconcilePluginGroups(vacated.order, vacated.splits, ids.map(id => ({pluginId:id,region:"right"})), ["G15","G:hancore.shibumi.gpu"])
+    if (!fixed || fixed.unplaced.length || fixed.order.right[7] !== "G:hancore.shibumi.storage" || fixed.order.left[8] !== "G:hancore.shibumi.gpu" || JSON.stringify(fixed.order.parked) !== '["G15"]' || !LayoutModel.validOrder(fixed.order) || LayoutModel.locationFor(fixed.order,"G15")) { console.error("P14 disabled fixed extra must yield before the later-region dynamic extra"); Qt.exit(1); return }
+    const returned = LayoutModel.reconcilePluginGroups(fixed.order, fixed.splits, ids.map(id => ({pluginId:id,region:"right"})), ["G:hancore.shibumi.gpu"])
+    if (!returned || returned.unplaced.length || returned.order.left[8] !== "G15" || returned.order.parked || returned.order.right[7] !== "G:hancore.shibumi.storage" || JSON.stringify(returned.splits) !== JSON.stringify(vacated.splits)) { console.error("P14 parked fixed return must use the same allocator without losing splits"); Qt.exit(1); return }
+    const next = LayoutModel.reconcilePluginGroups(order, LayoutModel.resizeSplits(LayoutModel.defaultSplits(), order), ids.map(id => ({pluginId:id,region:"right"})), ["G:hancore.shibumi.gpu"])
+    if (!next || next.unplaced.length || next.order.left[8] !== "G:hancore.shibumi.temperature" || JSON.stringify(next.order.right) !== JSON.stringify(order.right) || JSON.stringify(next.order.center) !== JSON.stringify(order.center) || JSON.stringify(next.order.left.slice(0,8)) !== JSON.stringify(order.left.slice(0,8))) { console.error("P14 disabled GPU did not release its exact additional slot"); Qt.exit(1); return }
+    let failures = 0; for (const id of ["hancore.shibumi.temperature", "hancore.shibumi.gpu", "hancore.shibumi.storage"]) { pluginRegistry.installedPlugins[id] = {kinds:["bar-widget"]}; for (const on of [true, false, true, false]) { layout = [{id:"other"}, {id:"hancore.shibumi.gpu", shibumiModule:true}, {id:"hancore.shibumi.temperature"}, {id:"hancore.shibumi.storage"}]; const before = JSON.stringify(layout); groups["G:" + id] = !on; if (!setPluginEnabled(id, on, true) || groupEnabled("G:" + id) !== on || layoutWrites !== 0 || JSON.stringify(layout) !== before) { console.error("V1 configured widget did not toggle its group without layout mutation", id, on, pluginActionError); failures++ } } } if (failures) Qt.exit(1); else { console.log("V1 configured widget toggles passed with actual Bar membership"); Qt.quit() } })
+''' .replace('BAR_CORE', str(Path(sys.argv[1]) / 'hancore.shibumi.bar/core')) + owner_methods + methods + '}\n')
+PY
+timeout 5 "$quickshell_bin" -p "$tmpdir/v1-layout-noop.qml"
 set +e
 output=$(timeout 8 env \
   HOME="$tmpdir/home" \
@@ -62,14 +107,10 @@ control_dir=$repo_root/hancore.shibumi.control-center
 for lifecycle_contract in \
     'ControlSettings.qml:property string pendingConfigureRoute: ""' \
     'ControlSettings.qml:function scheduleConfigureRoute(value)' \
-    'ControlSettings.qml:id: configureRouteSync' \
-    'control-center-smoke.qml:malformed Health result replaced the last report' \
-    'control-center-smoke.qml:closing the panel stopped or destroyed Health' \
-    'control-center-smoke.qml:reopened Health did not expose the completed report'; do
+    'ControlSettings.qml:id: configureRouteSync'; do
   file=${lifecycle_contract%%:*}
   label=${lifecycle_contract#*:}
   target="$control_dir/$file"
-  [[ -f $target ]] || target="$repo_root/tests/$file"
   rg -Fq "$label" "$target" \
     || fail "Health lifecycle contract drifted: $label"
 done
@@ -88,17 +129,13 @@ rg -Fq 'readonly property bool animationActive: pointer.containsMouse' \
 rg -Fq '&& stateService.requestedConfig ? stateService.requestedConfig' \
   "$control_dir/BarWidget.qml" \
   || fail "G1 launcher does not consume requested presentation state"
-for preview_panel in \
-    "$control_dir/ControlCenterPanel.qml" \
-    "$repo_root/tests/fixtures/ControlCenterTestPanel.qml"; do
-  for preview_contract in \
-      'readonly property var requestedStateConfig:' \
-      'readonly property var workspaceConfig: requestedStateConfig.workspace' \
-      'readonly property var launcherConfig: requestedStateConfig.launcher' \
-      'requestedGroupEnabledForVariant'; do
-    rg -Fq "$preview_contract" "$preview_panel" \
-      || fail "Control Center requested-state fixture drifted: $preview_contract"
-  done
+for preview_contract in \
+    'readonly property var requestedStateConfig:' \
+    'readonly property var workspaceConfig: requestedStateConfig.workspace' \
+    'readonly property var launcherConfig: requestedStateConfig.launcher' \
+    'requestedGroupEnabledForVariant'; do
+  rg -Fq "$preview_contract" "$control_dir/ControlCenterPanel.qml" \
+    || fail "Control Center requested-state fixture drifted: $preview_contract"
 done
 rg -Fq 'readonly property bool nativePillSurfaceVisible: !stockOmarchyHost' \
   "$control_dir/BarWidget.qml" \
@@ -122,15 +159,17 @@ rg -Fq 'onClicked: function(mouse) { root.triggerPress(mouse.button) }' \
   || fail "stock Omarchy host icon is missing"
 rg -Fq 'source: Qt.resolvedUrl("assets/shibumi-icon-hikiryo.svg")' \
   "$control_dir/BarWidget.qml" \
-  || fail "stock Omarchy host does not render the Hikiryō icon"
+  || fail "Shibumi and stock-host launchers must retain the Hikiryō SVG"
+! rg -Fq 'Presentation.BarGlyph {' "$control_dir/BarWidget.qml" \
+  || fail "launcher logos must bypass the shared symbol mapper"
 rg -Fq 'width: root.stockOmarchyHost ? 18 : 16' \
   "$control_dir/BarWidget.qml" \
   || fail "stock Omarchy host icon is not pixel-centered in its even slot"
 for hikiryo_tone_contract in \
-  'root.launcherConfig.icon === "shibumi" && !root.v1CustomFill' \
-  'id: v1TintedLauncherIcon' \
-  '&& root.v1CustomFill' \
-  'tint: root.widgetInk'; do
+  '&& !stockOmarchyHost && launcherConfig.icon === "shibumi" && v1CustomFill' \
+  'font.family: root.iconFont(root.launcherConfig.icon)' \
+  'text: root.iconGlyph(root.launcherConfig.icon)' \
+  'color: root.widgetInk'; do
   rg -Fq "$hikiryo_tone_contract" "$control_dir/BarWidget.qml" \
     || fail "Hikiryō V1 tone contract drifted: $hikiryo_tone_contract"
 done
@@ -174,7 +213,7 @@ for launcher_owner_contract in \
     'BarWidget.qml:String(launcherConfig.text || "shibumi")' \
     'WidgetAppearanceWorkbench.qml:readonly property bool selectedLauncher: selectedCatalogGroup === "G1"' \
     'WidgetAppearanceWorkbench.qml:if (catalogGroup === "G1") return []' \
-    'WidgetAppearanceWorkbench.qml:if (!selectedSupported || selectedLauncher) return false' \
+    'WidgetAppearanceWorkbench.qml:if (!selectedSupported || (selectedLauncher && !v1LayoutActive)) return false' \
     'WidgetAppearanceWorkbench.qml:visible: !root.selectedLauncher' \
     'WidgetAppearanceWorkbench.qml:return "Logo · " + (String(controller.launcherConfig.mode || "text")' \
     'BarFunctionsPage.qml:Launcher identity stays under Logo.'; do
@@ -183,17 +222,16 @@ for launcher_owner_contract in \
   rg -Fq "$label" "$control_dir/$file" \
     || fail "launcher presentation ownership drifted: $label"
 done
-if rg -q 'setting\("displayMode"|displayMode ===' \
-    "$control_dir/BarWidget.qml"; then
-  fail "launcher rendering still depends on generic widget presentation"
-fi
+rg -Fq '&& setting("displayMode", "full") === "icon-only"' \
+  "$control_dir/BarWidget.qml" \
+  || fail "launcher Icon-only presentation missing"
 for header_contract in \
   'ControlCenterPanel.qml:id: headerBand' \
   'ControlCenterPanel.qml:id: headerDivider' \
   'ControlCenterPanel.qml:ActiveBarStatus {' \
-  'ActiveBarStatus.qml:stateService.paletteColor("color03")' \
-  'ActiveBarStatus.qml:"OMARCHY BAR ACTIVE"' \
-  'ActiveBarStatus.qml:"SHIBUMI V2 ACTIVE" : "SHIBUMI V1 ACTIVE"' \
+  'ControlCenterPanel.qml:shellStyle: panel.shellStyle' \
+  'ControlCenterPanel.qml:barPosition: panel.barPosition' \
+  'ActiveBarStatus.qml:readonly property string statusText: styleName + " · " + positionName' \
   'ControlCenterPanel.qml:anchors.leftMargin: Commons.Style.space(20)' \
   'ControlCenterPanel.qml:anchors.rightMargin: Commons.Style.space(20)' \
   'ControlSettings.qml:anchors.leftMargin: Commons.Style.space(20)' \
@@ -421,7 +459,7 @@ for configure_contract in \
   'ActiveBarSettingsPage.qml:property bool motionDetailOpen: false' \
   'ActiveBarSettingsPage.qml:columns: 3' \
   'ActiveBarSettingsPage.qml:motionEnabled && (selected || previewPointer.containsMouse)' \
-  'ActiveBarSettingsPage.qml:detail: "Add slots and dividers"' \
+  'ActiveBarSettingsPage.qml:detail: "Add slots, dividers and drag"' \
   'ControlSettings.qml:id: page.id === "main" ? "configure" : page.id' \
   'ControlCenterPanel.qml:: settings.restorePage === "configure" ? "CONFIGURE"'; do
   file=${configure_contract%%:*}
@@ -481,14 +519,10 @@ for header_status_contract in \
     'ControlSettings.qml:controller.accentColor("color03")' \
     'ControlSettings.qml:text: "PLUGINS"' \
     'ControlSettings.qml:color: root.registryValueColor' \
-    'ControlCenterPanel.qml:readonly property int headerHealthErrorCount: settings.healthErrorCount' \
-    'control-center-smoke.qml:panel.headerHealthErrorCount !== 1'; do
+    'ControlCenterPanel.qml:readonly property int headerHealthErrorCount: settings.healthErrorCount'; do
   file=${header_status_contract%%:*}
   label=${header_status_contract#*:}
   target="$control_dir/$file"
-  if [[ $file == control-center-smoke.qml ]]; then
-    target="$repo_root/tests/$file"
-  fi
   rg -Fq "$label" "$target" \
     || fail "Control header status contract drifted: $label"
 done
@@ -667,12 +701,6 @@ for favorite_contract in \
       || fail "plugin favorite UI drifted: $label"
   fi
 done
-rg -Fq 'surfaceEffectOptionCount !== 2' \
-  "$repo_root/tests/control-center-smoke.qml" \
-  || fail "QML smoke does not reject V1 effects in V2"
-rg -Fq 'surfaceRadiusOptionCount !== 0' \
-  "$repo_root/tests/control-center-smoke.qml" \
-  || fail "QML smoke does not reject V1 radii in V2"
 
 [[ ! -e $control_dir/PresetMotionCanvas.qml ]] \
   || fail "retired continuous p5 animation remains"
@@ -737,6 +765,8 @@ fi
 
 for landing_contract in \
   'id: barButtonColumn' \
+  'model: root.barOptions.length' \
+  'readonly property var modelData: root.barOptions[index]' \
   'width: parent.width' \
   'radius: root.controller.controlRadius' \
   'id: routeCanvas' \
@@ -939,7 +969,7 @@ rg -Fq 'visible: root.shibumiActive && !root.v2Active' \
 rg -Fq 'visible: root.v2Active' \
   "$control_dir/ActiveBarSettingsPage.qml" \
   || fail "V2 slot and divider controls are not capability-gated"
-rg -Fq 'detail: "Add slots and dividers"' \
+rg -Fq 'detail: "Add slots, dividers and drag"' \
   "$control_dir/ActiveBarSettingsPage.qml" \
   || fail "V2 edit mode does not explain its layout capability"
 
@@ -1071,14 +1101,14 @@ for health_contract in \
     'return controller.accentColor("color01")' \
     'return controller.accentColor("color03")' \
     '["runtime-errors", "bar-runtime", "managed-plugins"]' \
-    'return parts.length > 0 ? parts.join("  ·  ") : "Not checked yet"' \
+    'if (primaryChecks.length > 0) return "healthy"' \
     'verticalAlignment: Text.AlignVCenter' \
     'checkRow.interactive && checkRow.extra !== ""' \
     'readonly property int statusColumnWidth: 62' \
     'width: root.statusColumnWidth' \
     'width: Math.max(1, checkRow.width - root.rowHorizontalPadding * 2)' \
     'horizontalAlignment: Text.AlignLeft' \
-    'anchors.leftMargin: 0' \
+    'anchors.leftMargin: Commons.Style.space(10)' \
     'text: "Shibumi " + root.installedShibumiVersion' \
     'text: root.installChannelLabel' \
     'report.installOrigin === "package"' \
@@ -1099,15 +1129,39 @@ for health_contract in \
     || fail "Health route contract drifted: $health_contract"
 done
 
-for health_error_contract in \
-    'id: "runtime-errors"' \
-    'status: "error"' \
-    'health.diagnosticCode(error)' \
-    'health.diagnosticIssueUrl(error)' \
-    'health.copyDiagnostic(error)'; do
-  rg -Fq "$health_error_contract" "$repo_root/tests/control-center-smoke.qml" \
-    || fail "Health error-action smoke contract drifted: $health_error_contract"
+for health_projection_contract in \
+    'HealthProjection.js:"runtime-errors", "runtime-errors-omarchy"' \
+    'HealthProjection.js:"runtime-errors-third-party", "runtime-errors-unknown"' \
+    'HealthProjection.js:"runtime-warnings", "runtime-warnings-omarchy"' \
+    'HealthProjection.js:"runtime-warnings-third-party", "runtime-warnings-unknown"' \
+    'HealthProjection.js:status === "error" || status === "warning"' \
+    'HealthProjection.js:String(check.owner || "unknown") !== "shibumi"' \
+    'HealthProjection.js:check.value === "Log unavailable"' \
+    'ControlCenterPanel.qml:HealthProjection.primaryChecks(healthReport)' \
+    'ControlMainPage.qml:controller.healthPrimaryChecks' \
+    'ControlMainPage.qml:if (primaryChecks.length > 0) return "healthy"' \
+    'ControlSettings.qml:healthChecked: healthPrimaryChecks.length > 0'; do
+  file=${health_projection_contract%%:*}
+  label=${health_projection_contract#*:}
+  target="$control_dir/$file"
+  rg -Fq "$label" "$target" \
+    || fail "Health presentation projection drifted: $label"
 done
+if rg -q 'check\.group|Number\([^)]*check\.value' \
+    "$control_dir/HealthProjection.js"; then
+  fail "Health presentation projection uses a broad group or numeric text parser"
+fi
+if rg -q 'otherRuntime|not attributed|No Shibumi findings|0 Shibumi findings' \
+    "$control_dir/ControlMainPage.qml" \
+    "$control_dir/ControlSettings.qml" \
+    "$control_dir/ControlCenterPanel.qml"; then
+  fail "Health still exposes non-Shibumi runtime findings"
+fi
+if rg -q 'otherRuntimeChecks|showCount|boundedTitle|tooltipText|ShibumiPillToolTip|readonly property alias tooltip' \
+    "$control_dir/HealthProjection.js" \
+    "$control_dir/PluginSectionHeader.qml"; then
+  fail "retired Health-only projection header support remains"
+fi
 
 if rg -q 'additional checks|detailChecks|detailsOpen' \
     "$control_dir/ControlMainPage.qml"; then
@@ -1117,7 +1171,7 @@ if rg -Fq 'warning(s)' "$control_dir/ControlMainPage.qml"; then
   fail "Health still exposes machine-oriented status grammar"
 fi
 
-if rg -q 'runQuickSystemAction|omarchy-system-lock|omarchy-system-reboot|omarchy-system-shutdown|systemctl.*suspend' \
+if rg -q 'runQuickSystemAction|omarchy-system|systemctl.*suspend' \
     "$control_dir/ControlMainPage.qml"; then
   fail "Health still duplicates authoritative App Menu session actions"
 fi
@@ -1125,8 +1179,8 @@ for action_contract in \
     'function runQuickSystemAction(action)' \
     'screensaver: ["omarchy-launch-screensaver", "force"]' \
     'lock: ["omarchy-system-lock"]' \
-    'reboot: ["omarchy-system-reboot"]' \
-    'shutdown: ["omarchy-system-shutdown"]' \
+    'reboot: ["sh", "-c", "if command -v omarchy-system >/dev/null 2>&1; then exec omarchy-system reboot; else exec omarchy-system-reboot; fi"]' \
+    'shutdown: ["sh", "-c", "if command -v omarchy-system >/dev/null 2>&1; then exec omarchy-system shutdown; else exec omarchy-system-shutdown; fi"]' \
     'if (stockOmarchyHost) return false'; do
   rg -Fq "$action_contract" "$control_dir/ControlCenterPanel.qml" \
     || fail "Quick system-action delegation drifted: $action_contract"
@@ -1163,7 +1217,7 @@ for return_contract in \
 done
 
 for label in Status Battery \
-    'Bar border' 'Panel + tooltip' Border Frost Shadow \
+    'Bar border' 'Panels' Border Frost Shadow \
     'Radius 12' 'Radius 6'; do
   rg -Fq "label: \"$label\"" "$control_dir" \
     --glob '*.qml' --glob '*.js' \
@@ -1583,11 +1637,11 @@ if rg -Fq 'height: visible ? Commons.Style.space(48) : 0' \
   fail "plugin feedback still shifts the catalog layout"
 fi
 for suite_boundary in \
-    'userToggleable: barWidget && (!suiteManaged || group !== "")' \
-    'styleAvailable: true' \
-    'V1 has no free extension slot.' \
+    'userToggleable: barWidget && placement !== "" && (!suiteManaged || group !== "")' \
+    'styleAvailable: placement !== ""' \
+    'No free place in the V1 bar. Turn off another additional widget first.' \
     'Control Center rejected suite-internal plugin toggle:' \
-    '? String(manifest.barWidget.defaultSection) : "center"' \
+    '? ownerWidget.nativeDefaultSection(metadata ? metadata.defaultSection : undefined) : ""' \
     'setPluginBarWidgetEnabled(id, enabled === true, section)'; do
   rg -Fq "$suite_boundary" "$control_dir/ControlCenterPanel.qml" \
     || fail "plugin-manager suite boundary drifted: $suite_boundary"
@@ -1667,7 +1721,7 @@ rg -Fq 'function beginBarEditing()' \
 rg -Fq 'visible: root.shibumiActive && !root.v2Active' \
   "$control_dir/ActiveBarSettingsPage.qml" \
   || fail "V1-only split and gap controls are not capability-gated"
-rg -Fq 'detail: "Add slots and dividers"' \
+rg -Fq 'detail: "Add slots, dividers and drag"' \
   "$control_dir/ActiveBarSettingsPage.qml" \
   || fail "V2 layout action does not explain its capability contract"
 if rg -Fq 'label: "Group separator"' "$control_dir/BarFunctionsPage.qml"; then
@@ -1781,15 +1835,10 @@ for content_cycle_contract in \
     'BarFunctionsPage.qml:readonly property string selectedWidgetMode:' \
     'BarFunctionsPage.qml:function cycleSelectedWidgetMode()' \
     'WidgetAppearanceWorkbench.qml:id: contentModeChoices' \
-    'WidgetAppearanceWorkbench.qml:onChosen: value => root.setWidgetMode(value)' \
-    'control-center-smoke.qml:V1 Default/Compact choice did not cycle'; do
+    'WidgetAppearanceWorkbench.qml:onChosen: value => root.setWidgetMode(value)'; do
   file=${content_cycle_contract%%:*}
   label=${content_cycle_contract#*:}
-  if [[ $file == control-center-smoke.qml ]]; then
-    target="$repo_root/tests/$file"
-  else
-    target="$control_dir/$file"
-  fi
+  target="$control_dir/$file"
   rg -Fq "$label" "$target" \
     || fail "single Content cycle contract drifted: $label"
 done
@@ -1801,7 +1850,7 @@ for profile_icon_contract in \
     'WidgetAppearanceWorkbench.qml:{ value: "full", label: "Compact" }' \
     'WidgetAppearanceWorkbench.qml:readonly property var v1CompactGroupIds:' \
     'WidgetAppearanceWorkbench.qml:if (catalogGroup === "G9") return mediaStyleOptions' \
-    'WidgetAppearanceWorkbench.qml:if (controller.v2LayoutActive === true) return displayModeOptions' \
+    'WidgetAppearanceWorkbench.qml:return displayModeOptions' \
     'WidgetAppearanceWorkbench.qml:{ value: "full", label: "Default", enabled: true }' \
     'WidgetAppearanceWorkbench.qml:{ value: "icon", label: "Compact", enabled: true }' \
     'WidgetAppearanceWorkbench.qml:readonly property bool selectedV1Appearance:' \
@@ -1822,15 +1871,10 @@ done
 for compact_cycle_contract in \
     'BarFunctionsPage.qml:function cycleSelectedWidgetSurface()' \
     'WidgetAppearanceWorkbench.qml:id: surfaceModeChoices' \
-    'WidgetAppearanceWorkbench.qml:onChosen: value => root.setWidgetSurface(value)' \
-    'control-center-smoke.qml:single Surface button did not cycle its value'; do
+    'WidgetAppearanceWorkbench.qml:onChosen: value => root.setWidgetSurface(value)'; do
   file=${compact_cycle_contract%%:*}
   label=${compact_cycle_contract#*:}
-  if [[ $file == control-center-smoke.qml ]]; then
-    target="$repo_root/tests/$file"
-  else
-    target="$control_dir/$file"
-  fi
+  target="$control_dir/$file"
   rg -Fq "$label" "$target" \
     || fail "compact widget cycle contract drifted: $label"
 done
@@ -1872,15 +1916,10 @@ for opacity_cycle_contract in \
     'WidgetAppearanceWorkbench.qml:{ value: 1, label: "100%" }' \
     'WidgetAppearanceWorkbench.qml:{ value: 0.8, label: "80%" }' \
     'WidgetAppearanceWorkbench.qml:{ value: 0.6, label: "60%" }' \
-    'WidgetAppearanceWorkbench.qml:{ value: 0.4, label: "40%" }' \
-    'control-center-smoke.qml:single Opacity button did not cycle its value'; do
+    'WidgetAppearanceWorkbench.qml:{ value: 0.4, label: "40%" }'; do
   file=${opacity_cycle_contract%%:*}
   label=${opacity_cycle_contract#*:}
-  if [[ $file == control-center-smoke.qml ]]; then
-    target="$repo_root/tests/$file"
-  else
-    target="$control_dir/$file"
-  fi
+  target="$control_dir/$file"
   rg -Fq "$label" "$target" \
     || fail "single Opacity cycle contract drifted: $label"
 done

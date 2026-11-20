@@ -1,13 +1,22 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "." as Local
 
 Scope {
   id: root
 
   property int cpuConsumers: 0
   property int memoryConsumers: 0
-  readonly property bool active: cpuConsumers > 0 || memoryConsumers > 0
+  property int cpuPanelConsumers: 0
+  property string cpuModel: ""
+  property var loadAverage: []
+  property bool cpuModelRead: false
+  property int memoryPanelConsumers: 0
+  property bool memoryHardwareRead: false
+  property bool memoryHardwareReady: false
+  property string memoryHardwareInfo: ""
+  readonly property bool active: cpuConsumers > 0 || memoryConsumers > 0 || cpuPanelConsumers > 0
   readonly property int intervalMs: 2000
 
   property int cpuPercent: 0
@@ -21,6 +30,14 @@ Scope {
   property int memFreeMiB: 0
   property int memBuffersMiB: 0
   property int memCachedMiB: 0
+  property bool memorySampleReady: false
+  property bool sweepOwnerActive: true
+  readonly property bool memorySweepRunning: Local.MemorySweep.busy
+  readonly property string memorySweepError: Local.MemorySweep.error
+  readonly property real memorySweepBeforeMiB: Local.MemorySweep.beforeMiB
+  readonly property real memorySweepAfterMiB: Local.MemorySweep.afterMiB
+  onSweepOwnerActiveChanged: if (!sweepOwnerActive) Local.MemorySweep.release(root)
+  Component.onDestruction: Local.MemorySweep.release(root)
   readonly property int memUsedMiB: Math.max(0, memTotalMiB - memAvailableMiB)
   readonly property int memPercent: memTotalMiB > 0
     ? Math.max(0, Math.min(100, Math.round(memUsedMiB / memTotalMiB * 100)))
@@ -35,12 +52,24 @@ Scope {
     } else if (kind === "memory") {
       memoryConsumers++
       if (memoryConsumers === 1) memoryFile.reload()
+    } else if (kind === "memoryPanel") {
+      memoryPanelConsumers++
+      if (!memoryHardwareRead) { memoryHardwareRead = true; memoryHardwareFile.text() }
+    } else if (kind === "cpuPanel") {
+      if (++cpuPanelConsumers === 1) {
+        // Lazy FileViews start async reads on text(), not on reload() alone.
+        if (!cpuModelRead) { cpuModelRead = true; modelFile.text() }
+        loadFile.reload()
+        loadFile.text()
+      }
     }
   }
 
   function release(kind) {
     if (kind === "cpu") cpuConsumers = Math.max(0, cpuConsumers - 1)
     else if (kind === "memory") memoryConsumers = Math.max(0, memoryConsumers - 1)
+    else if (kind === "memoryPanel") memoryPanelConsumers = Math.max(0, memoryPanelConsumers - 1)
+    else if (kind === "cpuPanel") cpuPanelConsumers = Math.max(0, cpuPanelConsumers - 1)
   }
 
   function parseCpu(text) {
@@ -77,7 +106,7 @@ Scope {
 
   function parseMemory(text) {
     let total = 0
-    let available = 0
+    let available = -1
     let free = 0
     let buffers = 0
     let cached = 0
@@ -93,16 +122,91 @@ Scope {
       else if (parts[0] === "Buffers:") buffers = value
       else if (parts[0] === "Cached:") cached = value
     }
-    if (total <= 0) return
+    if (total > 0) {
+      memTotalMiB = Math.round(total / 1024)
+      memAvailableMiB = Math.round(Math.max(0, available) / 1024)
+      memFreeMiB = Math.round(free / 1024)
+      memBuffersMiB = Math.round(buffers / 1024)
+      memCachedMiB = Math.round(cached / 1024)
+    }
+    memorySampleReady = total > 0 && available >= 0 && available <= total
+  }
 
-    memTotalMiB = Math.round(total / 1024)
-    memAvailableMiB = Math.round(available / 1024)
-    memFreeMiB = Math.round(free / 1024)
-    memBuffersMiB = Math.round(buffers / 1024)
-    memCachedMiB = Math.round(cached / 1024)
+  function readMemoryNow() {
+    // Drain an older read before requesting the action's fresh snapshot.
+    memoryFile.waitForJob()
+    memorySampleReady = false
+    memoryFile.reload()
+    memoryFile.waitForJob()
+    return memorySampleReady
+  }
+
+  function clearMemorySweepResult() {
+    Local.MemorySweep.clearResult()
+  }
+
+  function startMemorySweep(pageCache, compact) {
+    if (!sweepOwnerActive || memorySweepRunning || typeof pageCache !== "boolean"
+        || typeof compact !== "boolean" || !(pageCache || compact)) return false
+    clearMemorySweepResult()
+    if (!readMemoryNow()) {
+      Local.MemorySweep.error = "Could not read fresh memory data"
+      return false
+    }
+    const steps = ["status=0"]
+    if (pageCache) steps.push("sync && echo 3 > /proc/sys/vm/drop_caches || status=1")
+    if (compact) steps.push("echo 1 > /proc/sys/vm/compact_memory || status=1")
+    steps.push("exit \"$status\"")
+    return Local.MemorySweep.start(root,
+      ["pkexec", "/bin/sh", "-c", steps.join("; ")], memAvailableMiB)
+  }
+
+  function parseMemoryHardware(text) {
+    memoryHardwareInfo = ""
+    const input = String(text || "")
+    if (input.length > 131072) return
+    // systemd's internal udev database: accept only these E: properties.
+    const modules = {}
+    for (const line of input.split("\n")) {
+      const match = /^E:MEMORY_DEVICE_(\d+)_(SIZE|TYPE|CONFIGURED_SPEED_MTS|SPEED_MTS)=(.*)$/.exec(line)
+      if (!match) continue
+      const index = Number(match[1])
+      if (index >= 256) return
+      if (!modules[index]) modules[index] = {}
+      if (modules[index][match[2]] !== undefined) return
+      modules[index][match[2]] = match[3]
+    }
+    function positive(value) {
+      const number = Number(value)
+      return /^\d+$/.test(value || "") && Number.isSafeInteger(number) && number > 0 ? number : 0
+    }
+    let type = "", speed = Infinity
+    for (const index of Object.keys(modules).sort((a, b) => Number(a) - Number(b))) {
+      const module = modules[index]
+      if (!positive(module.SIZE)) continue
+      if (!type) {
+        type = String(module.TYPE || "").trim()
+        if (!/^[A-Za-z][A-Za-z0-9 ()-]{0,31}$/.test(type) || /^(Unknown|Other|Not Specified)$/i.test(type)) return
+      }
+      const rate = positive(module.CONFIGURED_SPEED_MTS) || positive(module.SPEED_MTS)
+      if (!rate) return
+      speed = Math.min(speed, rate)
+    }
+    if (type && isFinite(speed)) memoryHardwareInfo = type + " · " + speed + " MT/s"
+  }
+
+  function parseCpuModel(text) {
+    const match = /^(?:model name|Hardware)\s*:\s*([^\r\n]{1,256})/m.exec(String(text || "").slice(0, 8192))
+    cpuModel = match ? match[1].trim() : ""
+  }
+
+  function parseLoad(text) {
+    const values = String(text || "").slice(0, 256).trim().split(/\s+/).slice(0, 3).map(Number)
+    loadAverage = values.length === 3 && values.every(value => isFinite(value) && value >= 0) ? values : []
   }
 
   function refresh() {
+    if (cpuPanelConsumers > 0) { loadFile.reload(); loadFile.text() }
     if (cpuConsumers > 0) cpuFile.reload()
     if (memoryConsumers > 0) memoryFile.reload()
   }
@@ -119,6 +223,32 @@ Scope {
     path: "/proc/meminfo"
     printErrors: false
     onLoaded: root.parseMemory(text())
+    onLoadFailed: root.memorySampleReady = false
+  }
+
+  FileView {
+    id: memoryHardwareFile
+    path: "/run/udev/data/+dmi:id"
+    preload: false
+    printErrors: false
+    onLoaded: { root.parseMemoryHardware(text()); root.memoryHardwareReady = true }
+    onLoadFailed: { root.memoryHardwareInfo = ""; root.memoryHardwareReady = true }
+  }
+
+  FileView {
+    id: modelFile
+    path: "/proc/cpuinfo"
+    preload: false
+    printErrors: false
+    onLoaded: root.parseCpuModel(text())
+  }
+  FileView {
+    id: loadFile
+    path: "/proc/loadavg"
+    preload: false
+    printErrors: false
+    onLoaded: if (root.cpuPanelConsumers > 0) root.parseLoad(text())
+    onLoadFailed: root.loadAverage = []
   }
 
   Timer {

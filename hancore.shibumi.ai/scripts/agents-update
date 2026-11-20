@@ -4,7 +4,7 @@ set -euo pipefail
 
 omarchy_path=${1:-}
 shift || true
-timeout_seconds=${SHIBUMI_AI_UPDATE_TIMEOUT:-120}
+timeout_seconds=${SHIBUMI_AI_UPDATE_TIMEOUT:-300}
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 compat_bin="$script_dir/compat-bin"
 child_pid=""
@@ -95,16 +95,28 @@ if [[ ${1:-} == --probe-only ]]; then
 fi
 
 codex_requested=false
+codex_excluded=false
 agent_id_count=0
-for argument in "$@"; do
+forwarded=()
+while (( $# )); do
+  argument=$1; shift
+  except=false
   case $argument in
-    --force | --limits-only) continue ;;
+    --force | --limits-only) forwarded+=("$argument"); continue ;;
+    --except) except=true; argument=${1:-}; shift || true ;;
     --*) fail "unsupported agent updater option: $argument" ;;
   esac
   [[ $argument =~ ^[a-z0-9][a-z0-9._-]*$ ]] \
     || fail "invalid agent id: $argument"
   collector="$omarchy_path/bin/omarchy-agent-usage-$argument"
+  if $except; then
+    [[ -x $collector ]] || continue
+    forwarded+=(--except "$argument")
+    [[ $argument != codex ]] || codex_excluded=true
+    continue
+  fi
   [[ -x $collector ]] || fail "agent collector is missing: $collector"
+  forwarded+=("$argument")
   agent_id_count=$((agent_id_count + 1))
   [[ $argument != codex ]] || codex_requested=true
 done
@@ -114,7 +126,7 @@ if (( agent_id_count == 0 )) \
 fi
 
 compat_environment=()
-if $codex_requested; then
+if $codex_requested && ! $codex_excluded; then
   codex_search_path=${PATH:-/usr/bin:/bin}
   for candidate_dir in \
       "${HOME:?}/.local/bin" \
@@ -135,8 +147,14 @@ if $codex_requested; then
   fi
 fi
 
-setsid env OMARCHY_PATH="$omarchy_path" \
-  "${compat_environment[@]}" "$updater" "$@" &
+background=()
+if command -v taskset >/dev/null 2>&1; then
+  cpu_list=$(python3 -c 'import os; cpus = sorted(os.sched_getaffinity(0)); print(",".join(map(str, cpus[-max(2, len(cpus) // 4):])) if len(cpus) > 2 else "")' 2>/dev/null || true)
+  [[ -z $cpu_list ]] || background=(nice -n 19 taskset -c "$cpu_list")
+fi
+
+setsid "${background[@]}" env OMARCHY_PATH="$omarchy_path" \
+  "${compat_environment[@]}" "$updater" "${forwarded[@]}" &
 child_pid=$!
 watch_parent "$$" "$child_pid" &
 watchdog_pid=$!

@@ -22,7 +22,9 @@ Item {
     ? tokens.widgetContentColor(settings,
       bar ? bar.urgent : Commons.Color.accent)
     : (bar ? bar.urgent : Commons.Color.accent)
-  readonly property string displayMode: String(settings
+  readonly property bool iconOnly: tokens && tokens.v2Shell !== true
+    && settings && settings.displayMode === "icon-only"
+  readonly property string displayMode: iconOnly ? "full" : String(settings
     && settings.displayMode !== undefined ? settings.displayMode
     : (settings && settings.compact === true ? "icon" : "full"))
   readonly property bool compact: displayMode === "icon"
@@ -188,10 +190,11 @@ Item {
     implicitWidth: Commons.Style.space(22)
     implicitHeight: root.tokens ? root.tokens.slotHeight : Commons.Style.space(28)
 
-    Presentation.IconText {
+    Presentation.BarGlyph {
       anchors.centerIn: parent
       visible: !action.nerdGlyph
       text: action.icon
+      optical: !root.bar || !root.bar.vertical
       color: action.iconColor
       font.pixelSize: 14
       font.weight: Font.Medium
@@ -199,14 +202,14 @@ Item {
       Behavior on color { ColorAnimation { duration: 150 } }
     }
 
-    Text {
+    Presentation.BarGlyph {
       anchors.centerIn: parent
       visible: action.nerdGlyph
+      optical: !root.bar || !root.bar.vertical
       text: action.icon
       color: action.iconColor
       font.family: root.bar ? root.bar.fontFamily : Commons.Style.font.family
       font.pixelSize: Commons.Style.space(14)
-      renderType: Text.QtRendering
       Behavior on color { ColorAnimation { duration: 150 } }
     }
 
@@ -236,8 +239,9 @@ Item {
     implicitHeight: root.tokens
       ? root.tokens.slotHeight : Commons.Style.space(28)
 
-    Text {
+    Presentation.IconText {
       id: actionLabel
+      barText: true
       anchors.centerIn: parent
       text: textAction.label
       color: textAction.active ? root.widgetInk

@@ -13,6 +13,8 @@ Item {
   property string screenName: ""
   property var layoutSession: null
   property real availableWidth: 0
+  property bool layoutBusy: false
+  property real restageAvailableWidth: availableWidth
   property int visibilityStage: 0
   readonly property bool editing: layoutSession && layoutSession.editing
   readonly property bool v2Mode: bar.layoutController
@@ -62,6 +64,10 @@ Item {
   readonly property var stateConfig: stateService && stateService.config
     ? stateService.config : ({})
   readonly property var contentItem: content.item
+  readonly property bool savingsPending: contentItem && "savingsPending" in contentItem
+    ? contentItem.savingsPending : false
+  readonly property real spacingRecovery: contentItem && "spacingRecovery" in contentItem
+    ? contentItem.spacingRecovery : 0
   readonly property var groupGeometry: contentItem && contentItem.groupGeometry
     ? contentItem.groupGeometry : []
   readonly property var separatorGeometry: contentItem
@@ -225,6 +231,12 @@ Item {
     return ResponsiveLayout.groupVisibleAtStage(groupId, stage)
   }
 
+  function currentAvailableWidthForGroup(groupId) {
+    return contentItem && typeof contentItem.groupAvailableWidth === "function"
+      ? contentItem.groupAvailableWidth(groups.indexOf(groupId), restageAvailableWidth)
+      : availableWidth
+  }
+
   function budgetWidthForStage(stage) {
     var index = Math.max(0, Math.min(3, Number(stage) || 0))
     return Math.max(0, Number(stageBudgetWidths[index]) || 0)
@@ -365,10 +377,11 @@ Item {
         }
         return widths
       }
-      function groupAvailableWidth(index) {
+      function groupAvailableWidth(index, budget) {
         if (!root) return 0
-        if (root.v2Mode || root.region !== "center" || root.availableWidth <= 0)
-          return root.availableWidth
+        const available = budget === undefined ? root.availableWidth : budget
+        if (root.v2Mode || root.region !== "center" || available <= 0)
+          return available
         // Prefer G8 only while its enabled, stage-shown widgets are loaded.
         // Otherwise the first loaded center occupant owns the remainder.
         // Readiness, not hasContent/width, chooses the owner: its own budget
@@ -383,15 +396,34 @@ Item {
         if (index !== ownerIndex) return 0
         let siblings = root.canAddSlot ? root.groupSpacing + addSlotTarget.width : 0
         for (let i = 0; i < horizontalRepeater.count; i++) {
-          if (i === index) continue
           const cell = horizontalRepeater.itemAt(i)
-          if (cell && cell.effectiveHasContent)
+          if (!cell) continue
+          if (i !== index && cell.effectiveHasContent)
             siblings += cell.targetVisual.width + root.groupSpacing
+          if (cell.separated) siblings += root.splitGrow
         }
         // Zero is the host widget API's unconstrained sentinel.
-        return Math.max(1, root.availableWidth - siblings)
+        return Math.max(1, available - siblings)
       }
 
+      readonly property bool savingsPending: {
+        void(horizontalRow.children)
+        for (let i = 0; i < horizontalRepeater.count; i++) {
+          const cell = horizontalRepeater.itemAt(i)
+          if (cell && cell.contentShown && cell.savingsPending) return true
+        }
+        return false
+      }
+      readonly property real spacingRecovery: {
+        if (!root) return 0
+        void(root.groups)
+        let total = 0
+        for (let i = 0; i < horizontalRepeater.count; i++) {
+          const cell = horizontalRepeater.itemAt(i)
+          if (cell && cell.contentShown) total += cell.spacingRecovery
+        }
+        return total
+      }
       readonly property var groupGeometry: {
         if (!root) return []
         void(root.groups)
@@ -533,6 +565,8 @@ Item {
           readonly property real minimumGroupWidth: placeholderSlot
             ? emptySlotTarget.width : groupHasContent
               ? groupSlot.minimumResponsiveWidth : measuredMinimumGroupWidth
+          readonly property real spacingRecovery: groupSlot.spacingRecovery
+          readonly property bool savingsPending: groupSlot.savingsPending
           readonly property real contentLeft: targetVisual.x
           readonly property real contentRight: targetVisual.x + targetVisual.width
           readonly property real visualRightEdge: groupSlot.x + groupSlot.width
@@ -703,6 +737,7 @@ Item {
             bar: horizontalCell.lifecycleBar
             groupId: horizontalCell.modelData
             screenName: root ? root.screenName : ""
+            layoutBusy: root ? root.layoutBusy : false
             availableWidth: horizontalRow
               ? horizontalRow.groupAvailableWidth(horizontalCell.index) : 0
             enabled: root ? !root.slotEditing : false
@@ -843,7 +878,6 @@ Item {
             id: splitMarker
 
             readonly property bool hasFollowingGroup: root && horizontalRow
-              && (root.v2Mode || root.region !== "center")
               && horizontalCell.contentShown
               && (root.v2Mode
                 ? horizontalRow.hasContentAfter(horizontalCell.index)
@@ -1024,6 +1058,7 @@ Item {
             groupId: verticalCell.modelData
             screenName: root ? root.screenName : ""
             availableWidth: root ? root.availableWidth : 0
+            layoutBusy: root ? root.layoutBusy : false
             y: verticalCell.leadingGap
           }
         }

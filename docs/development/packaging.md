@@ -1,6 +1,8 @@
-# Arch packaging and AUR publication
+# Source installation and OPR packaging
 
-Status: `0.1.1-beta.14.1` local candidate contract
+Status: `0.2.5` source and package workflows. `shibumi-shell` has been in
+`omacom/omarchy-pkgs` since 0.2.0 (2026-11-04), reaching the `edge` ring first.
+AUR publication is not a target.
 
 Shibumi ships one versioned suite containing 24 separately validated Omarchy
 Quattro plugin roots. Pacman owns the immutable program files; the Shibumi
@@ -48,13 +50,8 @@ NVIDIA telemetry; their absence does not prevent the core suite from starting.
 
 ## User lifecycle
 
-After AUR publication, the normal installation is one copyable command:
-
-```bash
-omarchy pkg aur add shibumi-shell && shibumi-shell install --yes
-```
-
-Package upgrades require an explicit staging step:
+Follow the [installation guide](../install.md) for package and source routes.
+Package upgrades require an explicit per-user staging step:
 
 ```bash
 omarchy update
@@ -72,6 +69,11 @@ Beta.11 or an earlier package after Beta.12: Pacman replaces the current payload
 and lifecycle code before the user-level update runs, so Beta.12's storage guard
 cannot reject that package afterward. There is no reverse migration to legacy
 storage.
+
+The additional [Beta.16.5 downgrade warning and backup requirements](../install.md#backup-before-downgrade)
+apply even to readers using canonical State storage: Beta.15.4 and older
+cannot preserve a V1 layout containing `order.parked`. `--keep-settings` does
+not prevent this. Restore the settings with a matching payload.
 
 For a future older release that explicitly retains the same storage contract,
 rollback remains two-step and opt-in:
@@ -130,17 +132,18 @@ result. It requires:
 
 `--nodeps` is used only by this controlled rehearsal because dependency
 resolution is verified separately against the validation system. The package
-continues to depend on Omarchy's `omarchy-bluetooth-device` and
-`omarchy-audio-output-set-default` helpers for the Beta.12 hotfix; those are
-explicit compatibility debt, not undeclared native replacements. A clean-chroot
-build must perform normal dependency resolution before publication.
+requires Omarchy's `omarchy-bluetooth-device`, `omarchy-bluetooth-power`, and
+`omarchy-audio-output-set-default` helpers. Device/audio mutation paths retain
+their declared compatibility boundaries; global Bluetooth power delegates
+rfkill persistence to the host while BlueZ remains authoritative for state.
+A clean-chroot build must perform normal dependency resolution before publication.
 
-## Publication gates
+## Per-release packaging conditions
 
-The AUR entry remains blocked until all of these are true:
+For every release, retain these source, package and acceptance requirements:
 
 1. The exact candidate commit passes the source, package, and Health tests.
-2. the validation system passes package install, source-to-package migration, update,
+2. The validation system passes package install, source-to-package migration, update,
    intentional rollback, repair, uninstall, and stock recovery.
 3. Every Shibumi V1/V2/Omarchy bar-switch transition passes with one responsive
    production Quickshell process and no new bounded runtime error.
@@ -148,10 +151,13 @@ The AUR entry remains blocked until all of these are true:
    package.
 5. The immutable GitHub release asset exists and its SHA-256 equals PKGBUILD
    and `.SRCINFO`.
-6. `scripts/check-aur-package --publish-check` passes against the remote tag
-   and asset.
-7. The AUR package name can be registered and the one-command install is
-   repeated from a clean supported Omarchy Quattro account.
+6. OPR's package checks pass against the pinned release archive. The local
+   `scripts/check-aur-package --publish-check` validates the remote tag and
+   asset; it is not an OPR submission gate or an AUR publication target.
+7. The OPR update is accepted and installation is repeated from a clean
+   supported Omarchy Quattro account.
 
-AUR unavailability blocks only gates 6–7. It does not block local package
-construction or the validation system lifecycle acceptance.
+After each GitHub release, open an `update-shibumi-shell-<version>` pull request
+in `omacom/omarchy-pkgs`. The package reaches `edge` first; later rings follow
+Omarchy's promotion. OPR updates remain separate from local package construction
+and validation-system lifecycle acceptance.

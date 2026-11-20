@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import "LayoutModel.js" as LayoutModel
 import "V2LayoutModel.js" as V2LayoutModel
+import "GroupRegistry.js" as GroupRegistry
 
 Item {
   id: root
@@ -65,6 +66,18 @@ Item {
     return v2Mode
       ? V2LayoutModel.locationFor(v2Slots, groupId)
       : LayoutModel.locationFor(currentV1Order(), groupId)
+  }
+
+  function unplacedPluginIdsFor(specs) {
+    const result = []
+    if (!Array.isArray(specs)) return result
+    for (const spec of specs) {
+      const id = String(spec && spec.pluginId || "")
+      const group = v2Mode ? V2LayoutModel.dynamicGroupId(id) : LayoutModel.dynamicGroupId(id)
+      const placed = v2Mode ? V2LayoutModel.locationFor(v2Slots, group) : LayoutModel.locationFor(v1Slots, group)
+      if (group !== "" && !placed && result.indexOf(id) < 0) result.push(id)
+    }
+    return result
   }
 
   function currentV1Order() {
@@ -192,29 +205,67 @@ Item {
       currentV1Splits(currentOrder), groupId) !== null
   }
 
-  function reconcileV1PluginGroups(specs) {
+  function v1GroupDisabled(groupId) {
+    void(config)
+    return stateService && stateService.ready === true
+      && typeof stateService.groupEnabledForVariant === "function"
+      && stateService.groupEnabledForVariant(groupId, "v1") === false
+  }
+
+  function planV1PluginGroups(specs, stateValues) {
+    const order = currentV1Order()
+    const inactive = Array.isArray(specs) ? LayoutModel.GroupIds.concat(
+      specs.map(function(spec) {
+        return LayoutModel.dynamicGroupId(spec && spec.pluginId)
+      })).filter(function(group) {
+      const requested = stateValues && stateValues[group]
+      return group !== "" && (requested && typeof requested.v1 === "boolean"
+        ? requested.v1 === false : v1GroupDisabled(group))
+    }) : []
+    return LayoutModel.reconcilePluginGroups(
+      order, currentV1Splits(order), specs, inactive)
+  }
+
+  function reconcileV1PluginGroups(specs, allowPartialValue) {
     if (mutationBusy) return false
     const currentOrder = currentV1Order()
     const currentSplits = currentV1Splits(currentOrder)
-    const next = LayoutModel.reconcilePluginGroups(
-      currentOrder, currentSplits, specs)
-    if (!next || next.unplaced.length > 0) return false
+    const next = planV1PluginGroups(specs)
+    if (!next || (next.unplaced.length > 0 && allowPartialValue !== true)) return false
     if (LayoutModel.sameOrder(currentOrder, next.order)
         && LayoutModel.sameSplits(currentSplits, next.splits, next.order))
       return true
     return persist(next.order, next.splits)
   }
 
-  function reconcileV2PluginGroups(specs, syncValue, followRegionsValue) {
+  function reconcileV2PluginGroups(specs, syncValue, followRegionsValue, allowPartialValue) {
     if (!v2Mode || !stateService
         || typeof stateService.setV2Layout !== "function") return false
     const current = V2LayoutModel.copy(v2Slots)
     const next = V2LayoutModel.reconcilePluginGroups(
       current, specs, followRegionsValue === true)
-    if (!next || next.unplaced.length > 0 || mutationBusy) return false
+    if (!next || (next.unplaced.length > 0 && allowPartialValue !== true) || mutationBusy) return false
     if (bar && bar.layoutTransitionsSupported === true) {
-      if (syncValue === true)
+      if (syncValue === true) {
+        const host = bar, writer = stateService, serial = writer.writeSerial
+        if (writer.ready === true && writer.writePending === false
+            && Number.isInteger(serial) && host.mutationAdmissionReady === true
+            && V2LayoutModel.same(current, next.layout)
+            && typeof host.currentLayoutSnapshot === "function"
+            && typeof host.planV2DynamicLayout === "function") {
+          const observed = host.currentLayoutSnapshot()
+          const planned = host.planV2DynamicLayout(observed, next.layout)
+          if (GroupRegistry.validNativeLayout(observed)
+              && GroupRegistry.validNativeLayout(planned) && writer.same(observed, planned)
+              && stateService === writer && bar === host
+              && writer.ready === true && writer.writePending === false
+              && writer.writeSerial === serial && !mutationBusy
+              && host.mutationAdmissionReady === true
+              && V2LayoutModel.same(current, v2Slots)
+              && writer.same(observed, host.currentLayoutSnapshot())) return true
+        }
         return bar.requestV2LayoutTransition({v2Layout: next.layout})
+      }
       // The legacy provider chain must not consume queued State as saved.
       return V2LayoutModel.same(current, next.layout)
     }

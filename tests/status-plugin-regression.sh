@@ -4,6 +4,7 @@ set -euo pipefail
 
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo_root/tests/lib/baselines.sh"
+source "$repo_root/tests/lib/host-diagnostics.sh"
 shibumi_load_omarchy_baseline
 omarchy_path=$OMARCHY_PATH
 quickshell_bin=${QUICKSHELL_BIN:-/usr/bin/quickshell}
@@ -18,13 +19,22 @@ fail() {
 [[ -d $omarchy_path/shell ]] || fail "Omarchy shell not found: $omarchy_path/shell"
 [[ -x $quickshell_bin ]] || fail "Quickshell not found: $quickshell_bin"
 
-mkdir -p "$tmpdir/runtime" "$tmpdir/fixtures"
-chmod 700 "$tmpdir/runtime"
+mkdir -p "$tmpdir/runtime" "$tmpdir/fixtures" "$tmpdir/home" \
+  "$tmpdir/config" "$tmpdir/cache" "$tmpdir/data" "$tmpdir/state" \
+  "$tmpdir/tmp" "$tmpdir/pipewire"
+chmod 700 "$tmpdir/runtime" "$tmpdir/home" "$tmpdir/config" \
+  "$tmpdir/cache" "$tmpdir/data" "$tmpdir/state" "$tmpdir/tmp"
 shibumi_stage_suite_runtime "$repo_root" "$tmpdir"
+printf '{"suiteId":"hancore.shibumi","suitePayloadDigest":"%064d"}\n' 0 \
+  > "$tmpdir/hancore.shibumi.state/.shibumi-managed.json"
 mkdir -p "$tmpdir/hancore.shibumi.bar"
+install -Dm0644 "$repo_root/hancore.shibumi.bar/core/GroupRegistry.js" \
+  "$tmpdir/hancore.shibumi.bar/core/GroupRegistry.js"
 cp -a -- "$repo_root/hancore.shibumi.bar/services" \
   "$tmpdir/hancore.shibumi.bar/services"
 cp -a -- "$repo_root/hancore.shibumi.status" "$tmpdir/status"
+cp -- "$repo_root/tests/fixtures/ShibumiPanelTest.qml" \
+  "$tmpdir/status/ShibumiPanel.qml"
 cp -a -- "$omarchy_path/shell/Commons" "$tmpdir/Commons"
 cp -a -- "$omarchy_path/shell/Ui" "$tmpdir/Ui"
 install -m 0644 "$repo_root/tests/status-plugin-smoke.qml" "$tmpdir/shell.qml"
@@ -33,13 +43,31 @@ install -m 0644 "$repo_root/tests/fixtures/StatusTestWidget.qml" \
   "$repo_root/tests/fixtures/NotificationPanelTestView.qml" \
   "$tmpdir/fixtures/"
 
+printf '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><path d="M0 0h8v8H0z"/></svg>\n' >"$tmpdir/fixtures/app.svg"
 set +e
-output=$(timeout 8 env \
-  QT_QPA_PLATFORM=offscreen \
-  WAYLAND_DISPLAY= \
+output=$(timeout 8 env -i \
+  HOME="$tmpdir/home" \
+  XDG_CONFIG_HOME="$tmpdir/config" \
+  XDG_CACHE_HOME="$tmpdir/cache" \
+  XDG_DATA_HOME="$tmpdir/data" \
+  XDG_DATA_DIRS="$tmpdir/data" \
+  XDG_STATE_HOME="$tmpdir/state" \
   XDG_RUNTIME_DIR="$tmpdir/runtime" \
-  QML_IMPORT_PATH="$omarchy_path/shell${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}" \
-  QML2_IMPORT_PATH="$omarchy_path/shell${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}" \
+  TMPDIR="$tmpdir/tmp" \
+  PIPEWIRE_RUNTIME_DIR="$tmpdir/pipewire" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$tmpdir/runtime/no-session-bus" \
+  DBUS_SYSTEM_BUS_ADDRESS="unix:path=$tmpdir/runtime/no-system-bus" \
+  HYPRLAND_INSTANCE_SIGNATURE= \
+  WAYLAND_DISPLAY= \
+  DISPLAY= \
+  PATH=/usr/bin:/bin \
+  LANG=C.UTF-8 \
+  QT_QPA_PLATFORM=offscreen \
+  QT_QPA_PLATFORMTHEME= \
+  QT_QUICK_BACKEND=software \
+  QML_DISABLE_DISK_CACHE=1 \
+  QML_IMPORT_PATH="$omarchy_path/shell" \
+  QML2_IMPORT_PATH="$omarchy_path/shell" \
   "$quickshell_bin" -p "$tmpdir" 2>&1)
 rc=$?
 set -e
@@ -48,21 +76,56 @@ printf '%s\n' "$output"
 [[ $rc -eq 0 ]] || fail "component smoke exited $rc"
 grep -F 'status plugin smoke passed' <<<"$output" >/dev/null \
   || fail "success marker missing"
+unexpected_diagnostics=$(grep -E \
+  'WARN|ERROR|CRITICAL|TypeError|ReferenceError|Binding loop|Unable to assign|Cannot assign|Internal error' \
+  <<<"$output" | host_filter_startup_diagnostics \
+  -e 'Module path contains invalid characters for a module name:  "/hancore.shibumi.bar/services"' \
+  || true)
+[[ -z $unexpected_diagnostics ]] \
+  || fail "component smoke emitted an unexpected runtime diagnostic"
 
 status_widget="$repo_root/hancore.shibumi.status/BarWidget.qml"
 status_service="$repo_root/hancore.shibumi.status/Service.qml"
+bar_widget="$repo_root/hancore.shibumi.bar/Bar.qml"
+python3 - "$bar_widget" "$status_widget" <<'PY'
+from pathlib import Path
+import sys
+
+bar = Path(sys.argv[1]).read_text()
+status = Path(sys.argv[2]).read_text()
+try:
+    bar_dtor = bar.index("  Component.onDestruction: {", bar.index("  Component.onCompleted: {"))
+    teardown_reset = bar.index("    tearingDown = true", bar_dtor)
+    status_dtor = status.index("  Component.onDestruction: {")
+    registered_reset = status.index("      updateWidget.registeredBar = null", status_dtor)
+    update_reset = status.index("    if (updateWidget && \"bar\" in updateWidget) updateWidget.bar = null", status_dtor)
+    tray_reset = status.index("    if (trayWidget && \"bar\" in trayWidget) trayWidget.bar = null", status_dtor)
+except ValueError:
+    raise SystemExit("Status teardown ordering source guard anchor drifted")
+if teardown_reset != bar_dtor + len("  Component.onDestruction: {\n"):
+    raise SystemExit("Bar teardown flag is not the first destruction statement")
+if not registered_reset < update_reset < tray_reset:
+    raise SystemExit("Status teardown ordering no longer guards child Bar reset")
+if ('else if (lifecycleBar && "tearingDown" in lifecycleBar\n'
+        '        && lifecycleBar.tearingDown === true)') not in status:
+    raise SystemExit("Status no longer handles WidgetSlot's pre-destruction Bar revoke")
+PY
+printf 'status teardown ordering source guard passed\n'
+rg -U -q 'Math\.abs\(saved - spacingSavingsLeft\) <= 1e-7\n[[:space:]]*&& now - spacingSavingsChangedAt < 500\) return' \
+  "$status_widget" \
+  || fail "status spacing savings no longer settle a self-induced width cycle"
 rg -Fq '["full", "icon", "text"]' "$status_widget" \
   || fail "status widget does not expose Full/Icon/Text display modes"
 if rg -q 'SystemTray\.items|NotificationServer|makoctl|pgrep -x hypridle' \
     "$repo_root/hancore.shibumi.status"; then
   fail "status plugin duplicates an official tray, notification, idle, or DND owner"
 fi
-rg -q 'registered(Source|Component)\("omarchy\.tray"\)' "$status_widget" \
+rg -Fq 'embed.resolveComponent("hancore.shibumi.status", "omarchy.tray")' "$status_widget" \
   || fail "status view does not resolve the official tray component"
-rg -q 'registered(Source|Component)\("hancore\.shibumi\.update-center"\)' \
+rg -Fq 'embed.resolveComponent("hancore.shibumi.status", "hancore.shibumi.update-center")' \
   "$status_widget" \
   || fail "status view does not resolve the Shibumi update center"
-rg -Fq 'registeredEmbeddedWidgetComponent(' "$status_widget" \
+rg -Fq 'registeredEmbeddedWidgetComponent(owner, id)' "$repo_root/hancore.shibumi.status/HostWidgetEmbed.qml" \
   || fail "status view bypasses owner-scoped embedded Component admission"
 for embedded_widget in hancore.shibumi.update-center omarchy.tray; do
   rg -Fq "\"$embedded_widget\": true" \
@@ -80,11 +143,13 @@ fi
 rg -q 'notificationPanelSource: Qt\.resolvedUrl\("NotificationPanel\.qml"\)' \
   "$status_widget" || fail "status view does not own the V1 notification panel"
 tray_view="$repo_root/hancore.shibumi.status/TrayStatusView.qml"
+rg -Fq 'source: String(trayDelegate.modelData.icon || "")' "$tray_view" \
+  || fail "pinned tray items must render their application icon"
 tray_panel="$repo_root/hancore.shibumi.status/TrayDrawerPanel.qml"
 tray_menu="$repo_root/hancore.shibumi.status/TrayAppMenuPanel.qml"
 rg -q 'pinnedCount \* Commons\.Style\.space\(18\)' "$tray_view" \
   || fail "pinned tray cells do not match the V1 18px geometry"
-[[ $(rg -c 'Commons\.Style\.space\(14\)' "$tray_view") -ge 4 ]] \
+[[ $(rg -c 'Commons\.Style\.space\(14\)' "$tray_view") -eq 2 ]] \
   || fail "pinned tray icons do not match the V1 14px geometry"
 rg -q 'readonly property string drawerTooltipText: totalCount' "$tray_view" \
   || fail "tray drawer tooltip does not retain the current V1 count contract"
@@ -191,6 +256,9 @@ rg -Fq 'notificationService.showHistory()' \
 rg -Fq 'text: "Recent"' \
   "$repo_root/hancore.shibumi.status/NotificationPanel.qml" \
   || fail "V1 notification panel has no recent-history action"
+rg -U -q 'id: tabRow\n[[:space:]]+visible: panel\.liveAvailable' \
+  "$repo_root/hancore.shibumi.status/NotificationPanel.qml" \
+  || fail "single-mode Recent view leaves a redundant tab row"
 rg -Fq 'notificationRow.bucket === "past" ? "RECENT" : "LIVE"' \
   "$repo_root/hancore.shibumi.status/NotificationPanel.qml" \
   || fail "V1 notification rows do not label live versus recent entries"

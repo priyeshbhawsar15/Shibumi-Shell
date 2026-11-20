@@ -95,8 +95,16 @@ ShellRoot {
   }
 
   QtObject {
+    id: fakeIdle
+    property bool stayAwake: false
+    property int setCalls: 0
+    function setIdleEnabled(enabled) { stayAwake = !enabled; setCalls++ }
+  }
+
+  QtObject {
     id: fakeShell
     property var bar: scalarBar
+    function firstPartyServiceFor(id) { return id === "omarchy.idle" ? fakeIdle : null }
     function serviceFor(pluginId) {
       if (pluginId === "hancore.shibumi.state") return fakeState
       if (pluginId === "hancore.shibumi.quick-access") return quickAccessService
@@ -463,10 +471,43 @@ ShellRoot {
           const statusFeedback = root.visibleText(presentationProbe, "Copied")
           if (!filterFeedback || !statusFeedback
               || String(filterFeedback.color)
-                !== String(quickAccessService.pickerPresentation.urgent)
+                !== String(Commons.Color.menu.text)
               || String(statusFeedback.color)
                 !== String(quickAccessService.pickerPresentation.urgent))
             return root.fail("typed filter or status feedback is not visible")
+          const savedConfig = fakeState.config
+          const savedMode = quickAccessService.mode
+          const savedLoading = quickAccessService.loading
+          quickAccessService.loading = false
+          for (const style of ["tanzaku", "hearthstone", "carousel"]) {
+            fakeState.config = ({ picker: {
+              imageStyle: style === "carousel" ? "tanzaku" : style,
+              mediaStyle: style
+            } })
+            quickAccessService.mode = style === "carousel" ? "screenshots" : "wallpaper"
+            quickAccessService.updateFilter("sam")
+            const feedback = root.visibleText(presentationProbe, "sam")
+            if (!feedback || feedback.font.pixelSize !== Commons.Style.font.body
+                || String(feedback.color) !== String(Commons.Color.menu.text))
+              return root.fail("picker filter typography or color drifted: " + style)
+            const field = feedback.parent
+            const background = Commons.Color.menu.background
+            if (String(field.color) !== String(Qt.rgba(background.r, background.g,
+                  background.b, 1)))
+              return root.fail("picker filter surface drifted: " + style)
+            quickAccessService.updateFilter("zzq")
+            if (quickAccessService.selectedEntry !== null || !feedback.visible
+                || feedback.text !== "zzq"
+                || !root.visibleText(presentationProbe, quickAccessService.emptyText))
+              return root.fail("picker filter disappeared with no matches: " + style)
+            quickAccessService.updateFilter("")
+            if (feedback.visible || field.visible)
+              return root.fail("empty picker filter did not hide: " + style)
+          }
+          fakeState.config = savedConfig
+          quickAccessService.mode = savedMode
+          quickAccessService.loading = savedLoading
+          quickAccessService.updateFilter("sam")
           quickAccessService.screenListOverride = [replacementFirstScreen, secondScreen]
           root.screenLifecycleStep = 1
           root.ticks = 0
@@ -549,8 +590,13 @@ ShellRoot {
             || imageWindowCarousel.skewOffset <= 0)
           return root.fail("Carousel did not retain its skewed-slice geometry")
         if (!first.toggleIdleInhibitor() || !first.idleInhibited
-            || !second.idleInhibited)
+            || !second.idleInhibited || fakeIdle.stayAwake !== true
+            || fakeIdle.setCalls !== 1)
           return root.fail("shared idle-inhibitor state")
+        fakeIdle.stayAwake = false
+        if (first.idleInhibited)
+          return root.fail("external Stay Awake change did not propagate")
+        fakeIdle.stayAwake = true
         first.openMode("wallpaper")
         root.phase++
         root.ticks = 0
@@ -675,7 +721,7 @@ ShellRoot {
             || first.displayMode !== "icon")
           return root.fail("quick-access display modes")
         if (!quickAccessService.startSelectionAction("wallpaper", "broken.jpg",
-            ["bash", "-c", "printf 'denied by fixture\\n' >&2; exit 7"]))
+            ["bash", "-c", "cat >/dev/null; printf 'denied by fixture\\n' >&2; exit 7"]))
           return root.fail("failed wallpaper action did not start")
         root.phase++
         root.ticks = 0
@@ -686,7 +732,7 @@ ShellRoot {
               !== "Could not apply broken.jpg. denied by fixture")
             return root.fail("failed wallpaper action was not reported")
           if (!quickAccessService.startSelectionAction("theme", "broken-theme",
-              ["bash", "-c", "printf 'theme denied by fixture\\n' >&2; exit 8"]))
+              ["bash", "-c", "cat >/dev/null; printf 'theme denied by fixture\\n' >&2; exit 8"]))
             return root.fail("failed theme action did not start")
           root.phase++
           root.ticks = 0
@@ -694,6 +740,16 @@ ShellRoot {
           if (quickAccessService.lastActionFailure
               !== "Could not apply broken-theme. theme denied by fixture")
             return root.fail("failed theme action was not reported")
+          if (root.phase === 8) {
+            quickAccessService.mode = "theme"
+            quickAccessService.filterText = ""
+            quickAccessService.entries = [{ directory: root.fixtureImageDir }]
+            root.phase++
+            return
+          }
+          if (!quickAccessService.selectedThemePalette.length) return
+          if (quickAccessService.selectedThemePalette.join(",") !== "#f38ba8,#a6e3a1,#f9e2af,#89b4fa,#f5c2e7,#94e2d5")
+            return root.fail("theme palette is not ANSI 1–6: " + quickAccessService.selectedThemePalette)
           stop()
           watchdog.stop()
           console.log("quick access plugin smoke passed")

@@ -11,7 +11,8 @@ Item {
   required property var bar
   required property var ownerShell
   required property Item ownerWidget
-  property Component panelComponent: null
+  property var panelComponent: null
+  HostWidgetEmbed { id: embed }
   property url panelSource: ""
   property var panelSettings: ({})
   property bool shuttingDown: false
@@ -43,7 +44,9 @@ Item {
     && Array.isArray(panel.displays) ? panel.displays : []
   readonly property int enabledDisplayCount: ready
     && panel.enabledDisplayCount !== undefined
-    ? Math.max(0, Number(panel.enabledDisplayCount) || 0) : 0
+    ? Math.max(0, Number(panel.enabledDisplayCount) || 0)
+    : displays.filter(display => display.enabled === true).length
+  readonly property bool displayToggleAvailable: ready && typeof panel.toggleDisplay === "function"
   readonly property bool textSizeAvailable: ready
     && Array.isArray(panel.textSizeStops) && panel.textSizeStops.length > 0
     && typeof panel.currentTextIndex === "function"
@@ -72,9 +75,12 @@ Item {
 
   function previewBrightness(value) {
     if (!ready || !brightnessAvailable) return false
-    if (typeof panel.previewBrightness === "function")
-      panel.previewBrightness(Math.max(1, Math.min(100, Number(value) || 1)))
-    else return setBrightness(value)
+    if (typeof panel.previewBrightness !== "function") return setBrightness(value)
+    const clamped = Math.max(1, Math.min(100, Number(value) || 1))
+    if (panel.previewBrightness.length === 1) panel.previewBrightness(clamped)
+    else if (panel.previewBrightness.length === 2 && focusedMonitor)
+      panel.previewBrightness(focusedMonitor, clamped)
+    else return false
     return true
   }
 
@@ -86,7 +92,10 @@ Item {
 
   function setScale(value) {
     if (!ready || typeof panel.setScale !== "function") return false
-    panel.setScale(String(value || ""))
+    if (panel.setScale.length === 1) panel.setScale(String(value || ""))
+    else if (panel.setScale.length === 2 && focusedMonitor)
+      panel.setScale(focusedMonitor, String(value || ""))
+    else return false
     return true
   }
 
@@ -141,18 +150,9 @@ Item {
 
   function syncPanelSource() {
     if (shuttingDown) return
-    panelLoader.sourceComponent = null
-    panelLoader.source = ""
-    if (panelComponent !== null) {
-      panelLoader.sourceComponent = panelComponent
-    } else if (String(panelSource)) {
-      panelLoader.setSource(panelSource, {
-        bar: hostProxy,
-        moduleName: "omarchy.monitor",
-        manageIpc: false,
-        settings: panelSettings
-      })
-    }
+    embed.syncLoader(panelLoader, panelComponent, panelSource, {
+      bar: hostProxy, moduleName: "omarchy.monitor", manageIpc: false, settings: panelSettings
+    }, ownerShell || ownerWidget)
   }
 
   function schedulePanelSync() {
@@ -167,13 +167,13 @@ Item {
     hiddenClose.stop()
     if (panel && panel.opened === true && typeof panel.close === "function")
       panel.close()
+    embed.shutdown()
     panelLoader.active = false
-    panelLoader.sourceComponent = null
-    panelLoader.source = ""
   }
 
   onPanelSettingsChanged: injectPanel()
   onBarChanged: injectPanel()
+  onOwnerShellChanged: { embed.revoke(); schedulePanelSync() }
   onPanelComponentChanged: schedulePanelSync()
   onPanelSourceChanged: schedulePanelSync()
   Component.onCompleted: schedulePanelSync()

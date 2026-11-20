@@ -104,7 +104,7 @@ class OpenCodeUsageRegressionTests(unittest.TestCase):
             model="current-a",
             input_tokens=100,
             output_tokens=50,
-            cache_read=500,
+            cache_read=1054540000,
         )
         self.add_message(
             session="current-b",
@@ -147,13 +147,71 @@ class OpenCodeUsageRegressionTests(unittest.TestCase):
         self.assertEqual(current_a["total"], 150)
         self.assertEqual(current_a["inputLabel"], "100")
         self.assertEqual(current_a["outputLabel"], "50")
-        self.assertEqual(current_a["cacheReadLabel"], "500")
+        self.assertEqual(current_a["cacheReadLabel"], "1.1B")
         self.assertEqual(current_a["todayLabel"], "0")
         self.assertEqual(current_a["pct"], 100)
         self.assertEqual(current_b["total"], 65)
         self.assertEqual(current_b["pct"], 43)
         self.assertEqual(output["_today_tokens"], 215)
         self.assertEqual(output["_day"], today.date().isoformat())
+
+    def test_v2_assistant_overrides_migrated_legacy_message(self) -> None:
+        timestamp = int(time.time() * 1000)
+        self.add_message(session="session", timestamp_ms=timestamp,
+                         model="legacy-model", input_tokens=9000)
+        data = {"model": {"id": "v2-model", "providerID": "opencode", "variant": "free"},
+                "tokens": {"input": 100, "output": 50, "reasoning": 10,
+                           "cache": {"read": 1000, "write": 5}},
+                "cost": 0, "time": {"created": timestamp, "completed": timestamp}}
+        with sqlite3.connect(self.database) as con:
+            con.execute("alter table message add column id text")
+            con.execute("update message set id = 'same-id'")
+            con.execute("create table session_message (id text primary key, session_id text, "
+                        "type text, seq integer, time_created integer, time_updated integer, data text)")
+            con.execute("insert into session_message values (?, ?, ?, ?, ?, ?, ?)",
+                        ("same-id", "session", "assistant", 1, timestamp, timestamp, json.dumps(data)))
+        output = self.run_scripts()
+        self.assertEqual(output["_today_tokens"], 165)
+        self.assertEqual(output["_today_tokens_with_cache_read"], 1165)
+        self.assertEqual(output["_model"], "v2-model (opencode)")
+        self.assertEqual(len(output["_models"]), 1)
+        self.assertEqual(output["_models"][0]["total"], 165)
+        self.assertEqual(output["_cost_today"], 0)
+
+    def test_prompts_sessions_and_recent_days(self) -> None:
+        now = datetime.now()
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        if min(now - today, today + timedelta(days=1) - now) < timedelta(minutes=5):
+            self.skipTest("local midnight boundary is too close for deterministic scope")
+        days = [(today - timedelta(days=offset)).date().isoformat() for offset in range(6, -1, -1)]
+        with sqlite3.connect(self.database) as con:
+            con.execute("alter table message add column id text")
+            con.execute("create table session (id text, parent_id text)")
+            con.execute("insert into session values ('root', null), ('other', null), ('child', 'root')")
+            con.execute("create table session_message (id text, session_id text, type text, "
+                        "time_created integer, time_updated integer, data text)")
+            for mid, session, at, role, tokens in [
+                ("prompt", "root", now, "user", 0), ("other", "other", now, "user", 0),
+                ("yesterday", "root", today - timedelta(hours=1), "user", 0),
+                ("child-prompt", "child", now, "user", 0),
+                ("answer", "root", now, "assistant", 10),
+                ("child-answer", "child", now, "assistant", 20),
+                ("no-model", "ignored", now, "assistant", 99),
+                ("oldest", "root", today - timedelta(days=6), "assistant", 5),
+            ]:
+                stamp = int(at.timestamp() * 1000)
+                data = {"model": {"id": "" if mid == "no-model" else "fixture"},
+                        "tokens": {"input": tokens, "cache": {"read": 1000}}}
+                con.execute("insert into session_message values (?, ?, ?, ?, ?, ?)",
+                            (mid, session, role, stamp, stamp, json.dumps(data)))
+            con.execute("insert into message values (?, ?, ?, ?, ?)",
+                        ("migrated", int(now.timestamp() * 1000), int(now.timestamp() * 1000),
+                         json.dumps({"role": "user"}), "prompt"))
+        output = self.run_scripts()
+        self.assertEqual(output["_today_prompts"], 2)
+        self.assertEqual(output["_today_sessions"], 3)
+        self.assertEqual(output["_recent_days"], [{"date": day, "messageCount": tokens}
+                         for day, tokens in zip(days, [5, 0, 0, 0, 0, 0, 30])])
 
     def test_local_day_bounds_follow_dst_midnights(self) -> None:
         if not hasattr(time, "tzset"):

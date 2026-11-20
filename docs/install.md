@@ -6,39 +6,44 @@ Shibumi installs 24 independent plugin roots into Omarchy's normal plugin
 directory. The repository root is a suite source, not a single installable
 Omarchy plugin.
 
+`0.2.5` is the current stable release target. See the
+[release notes](../.github/release-notes/v0.2.5.md) for changes.
+Install from the release tag using the source workflow below.
+Do not install or update from `main`.
+
 ## Requirements
 
 - Omarchy Quattro; other Omarchy generations are not supported
-- The package workflow installs required commands and fonts through Pacman and
-  skips dependencies that are already installed or provided
-- The source workflow additionally needs Git, HTTPS access to the repository,
+- Run the Pacman line below first; it installs the required commands and fonts
+  (Material Symbols icons come from `ttf-material-symbols-variable`) and skips
+  what is already installed. The suite itself never calls Pacman.
+- The source workflow also needs Git, HTTPS access to the repository,
   and a trusted local checkout
 
 The exact accepted Omarchy and Quickshell packages are recorded in the
 [Shibumi host compatibility record](architecture/quattro-compatibility.md).
 
-## Install from the Arch package
+Notification history follows the host's on-disk layout. On Omarchy 4.0.6 the Recent list
+keeps per-row removal and "Clear all". On Omarchy 4.5.0, Clear all hides every row of
+the host's history locally; ✕ hides one row; the host's history.json is not modified.
+Live rows remain unavailable through the host proxy on both.
 
-> [!NOTE]
-> `0.1.1-beta.14.1` is a local candidate and is not published to AUR. This is
-> the supported flow only after the release gates pass and publication is
-> separately authorized.
+## Install from the Omarchy package
 
-```bash
-omarchy pkg aur add shibumi-shell && shibumi-shell install --yes
-```
-
-The package manager installs immutable files under `/usr/share/shibumi-shell`
-and the stable `/usr/bin/shibumi-shell` command. It does not run an install
-hook, select a desktop user, edit `shell.json`, or copy plugins into a home
-directory. The unprivileged `shibumi-shell install` transaction performs those
-user-scoped operations explicitly and verifies the resulting Quattro runtime.
-
-Preview the same setup without changing user state:
+`shibumi-shell` is available from the Omarchy package repository since 0.2.0
+(`edge` from 2026-11-04; `rc` and `stable` after Omarchy's promotion).
 
 ```bash
-shibumi-shell install --dry-run
+omarchy pkg add shibumi-shell
+shibumi-shell install --yes
 ```
+
+The package brings the dependencies; the second line stages the plugins into your
+shell as your user. `shibumi-shell install --dry-run` prints every target
+without changing anything. Existing source installations switch as described
+in [Move from a checkout to the package](#move-from-a-checkout-to-the-package).
+Package installations update with `omarchy update` followed by
+`shibumi-shell update --yes` (see [Update](#update)).
 
 ## Install from source
 
@@ -48,22 +53,23 @@ For an intentional non-interactive installation:
 sudo pacman -S --needed python jq curl networkmanager power-profiles-daemon upower xdg-utils libnotify wl-clipboard ttf-material-symbols-variable ttf-jetbrains-mono-nerd-basic noto-fonts-cjk adwaita-fonts
 git clone https://github.com/HANCORE-linux/Shibumi-Shell.git
 cd Shibumi-Shell
-git checkout v0.1.1-beta.14.1
+git checkout v0.2.5
 ./scripts/shibumi-suite install --yes
 ```
 
 Do not install or update from `main`. If you previously installed from `main`, run `./scripts/shibumi-suite uninstall --keep-settings --yes` from that exact checkout before switching to a tag.
 
-This temporary source path installs the package-managed runtime dependencies
-first. `sudo` applies only to Pacman; the suite transaction still runs as the
-desktop user and never lets a package hook modify the home directory.
+The Pacman line installs the package-managed runtime dependencies first and
+is the only step that needs `sudo`; the suite transaction runs as the desktop
+user and never lets a package hook modify the home directory.
 
 To inspect the transaction before installing:
 
 ```bash
+sudo pacman -S --needed python jq curl networkmanager power-profiles-daemon upower xdg-utils libnotify wl-clipboard ttf-material-symbols-variable ttf-jetbrains-mono-nerd-basic noto-fonts-cjk adwaita-fonts
 git clone https://github.com/HANCORE-linux/Shibumi-Shell.git
 cd Shibumi-Shell
-git checkout v0.1.1-beta.14.1
+git checkout v0.2.5
 ./scripts/shibumi-suite install --dry-run
 ./scripts/shibumi-suite install
 ```
@@ -130,6 +136,11 @@ directories, invalid state, and unfinished predecessor transactions.
 
 ## Update
 
+Run `shibumi-shell update` and `shibumi-shell uninstall` (or their source equivalents)
+from a terminal inside the Hyprland session. Plain SSH cannot reach the compositor
+for the shell restart; it can hang and leave an interrupted transaction, recovered
+by the next run from a session terminal.
+
 For a package installation, update the system package through Omarchy and then
 stage the new immutable payload into the current user's shell:
 
@@ -143,15 +154,25 @@ Pacman updating `/usr/share/shibumi-shell` does not silently change a running
 desktop. The explicit update validates, stages, reloads, and verifies all 24
 plugins as one transaction.
 
-For a trusted source checkout (supported predecessors: tags v0.1.1-beta.11 through v0.1.1-beta.13):
+Update an exactly admitted source installation to 0.2.5 from its trusted
+checkout. The most recent published predecessor is 0.2.4: tag `12763c68` and
+the main integration merge `700180ef` (#106)
+carry the same released payload; its package identity is admitted too. Older
+supported identities, including Beta.16.4 and Beta.16.5, remain in the
+[lifecycle predecessor contract](../contracts/lifecycle-predecessors-v1.json).
+Do not treat this list as a version range:
 
 ```bash
 cd Shibumi-Shell
 git fetch --tags
-git checkout v0.1.1-beta.14.1
+git checkout v0.2.5
 ./scripts/shibumi-suite update --dry-run
-./scripts/shibumi-suite update
+./scripts/shibumi-suite update --yes
+./scripts/shibumi-suite status
 ```
+
+If `git fetch --tags` reports `would clobber existing tag`, use `git fetch --tags --force`;
+`v0.2.1` was re-tagged before publication.
 
 An update requires a suite-managed Shibumi installation. It stages all 24
 current plugin roots as one transaction and verifies that the shell executes
@@ -167,7 +188,7 @@ discards staging, and leaves the live plugins unchanged; unlock the active
 session and retry. For an external-bar installation, update preserves the
 active bar and layout.
 
-Beta.14.1 inventories every existing journal before recovery and admits only
+The lifecycle inventories every existing journal before recovery and admits only
 exact revision, plugin-digest, payload-digest, activation, marker, and journal
 identities declared by the lifecycle predecessor contract. A shared version
 string is not sufficient. Step-6 Power registration or journal metadata, mixed
@@ -175,11 +196,13 @@ live markers, multiple public journals, and unknown states fail closed before
 recovery or mutation. One fully admitted interrupted journal may be recovered
 before the lifecycle checks live payload identity again.
 
+Exact supported identities are declared in
+[`lifecycle-predecessors-v1.json`](../contracts/lifecycle-predecessors-v1.json);
+a version range or arbitrary development checkout is not an admission rule.
 Tag `v0.1.1-beta.14` was never published and is not a supported predecessor.
-Issue #56 recovery for a source checkout outside the admitted identities is
-supervised: run `./scripts/shibumi-suite uninstall --keep-settings --yes` from
-that exact checkout, then install `v0.1.1-beta.14.1`. Do not bypass admission by
-manually deleting lifecycle state, journals, markers, or plugin directories.
+For a source checkout outside the admitted identities, follow
+[supervised recovery](#supervised-recovery). Do not bypass admission by manually
+deleting lifecycle state, journals, markers, or plugin directories.
 
 ### Move from a checkout to the package
 
@@ -196,6 +219,14 @@ layout, settings, and unrelated Omarchy data, and records `package` as the new
 authoritative origin. The old checkout is not deleted or modified.
 
 ### Roll back a package version
+
+> [!WARNING]
+> **Downgrade warning (also applies to 0.2.0).**
+> Beta.15.4 and older cannot read V1 layouts containing
+> `order.parked`. They reset V1 order, roles, and splits to defaults; other
+> settings and V2 remain. `uninstall --keep-settings` does not prevent this.
+> Back up the complete settings before attempting a downgrade, including a
+> source-checkout downgrade. See [backup before downgrade](#backup-before-downgrade).
 
 Roll back only to an accepted package that explicitly uses the same canonical
 State service-entry storage contract. Beta.12 is the first package with that
@@ -218,6 +249,28 @@ a newer staged suite with an older payload. The authorized rollback still uses
 the target release's normal transaction, runtime verification, and automatic
 failure recovery, but only between identities that release explicitly admits.
 It is not a Step-6 rollback mechanism.
+
+### Backup before downgrade
+
+Save a complete, consistent copy outside the live configuration directories,
+with no settings or lifecycle transaction being written. Include:
+
+- `${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json` in full, not only the
+  State entry: it contains `plugins[]`, the State `.shibumi` settings, bar
+  layouts, and retained host-layout data;
+- `${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc`,
+  if present, for suite-managed menu routing;
+- `${XDG_STATE_HOME:-$HOME/.local/state}/shibumi/` in full, including
+  `install.json`, `backups/`, and any `transactions/`, as lifecycle recovery
+  evidence. Resolve an unfinished transaction before attempting a downgrade.
+
+Use the actual configured paths if lifecycle overrides are in use. Keep the
+backup with the installed source revision or package identity and retain access
+to that exact code. A backup does not make an old reader understand new layout
+fields. For an old target, retain a pre-upgrade settings backup compatible with
+that reader. Restore the settings with a matching payload. Do not
+copy an old `install.json`, edit `order.parked`, or delete journals to force
+admission. `--keep-settings` preserves data, not schema compatibility.
 
 ## Status
 
@@ -289,6 +342,8 @@ restores the managed layout.
 
 ## Uninstall
 
+Run these commands from a terminal inside the Hyprland session, not plain SSH.
+
 For a package installation, remove the user-scoped suite first and the system
 package second:
 
@@ -314,7 +369,7 @@ For a source installation, preview and remove all managed Shibumi plugins with:
 ```
 
 Do not follow the source uninstall with `omarchy pkg drop shibumi-shell`.
-The transitional source workflow did not install a package with that name.
+The source workflow did not install a package with that name.
 Its Pacman-managed runtime dependencies remain installed because they may be
 shared with Omarchy or other software.
 
@@ -345,6 +400,7 @@ ${XDG_STATE_HOME:-$HOME/.local/state}/shibumi/
 ```
 
 Interrupted transactions are recovered before the next mutating suite command.
+After a reboot, recovery accepts a changed device number only for the same config-directory inode and a journal from an earlier boot (older journals use their modification time); inode changes still refuse recovery.
 Do not edit `install.json`, transaction snapshots, ownership markers, or plugin
 hashes by hand.
 
@@ -355,6 +411,36 @@ If an operation fails:
 3. rerun the same suite command so automatic recovery can complete;
 4. use [troubleshooting](development/troubleshooting.md) before removing files
    manually.
+
+### Supervised recovery
+
+#### Installed from `main` before a tagged release
+
+With maintainer guidance, identify the exact `sourceRevision` in `install.json`
+and use a clean checkout of that commit to uninstall with settings retained,
+then install the published tag. For example, only if the recorded revision is
+`e92d8ee1ce9821d0b203a9d4d5dd9932d2e460fb` (Beta.10, August 21):
+
+```bash
+git checkout e92d8ee1ce9821d0b203a9d4d5dd9932d2e460fb
+./scripts/shibumi-suite uninstall --keep-settings --yes
+git checkout v0.2.5
+./scripts/shibumi-suite install --yes
+```
+
+The stock Omarchy bar appears between uninstall and install. Do not substitute
+a different old revision or delete `install.json` to bypass admission.
+
+#### Plugin root without `.shibumi-managed.json`
+
+Only after the maintainer confirms an admitted `install.json`, a normal
+non-symlink plugin root whose marker alone is missing, and no pending recovery,
+move that root aside to a new, unused path outside the plugin directory (for
+example, `mv -T -- ~/.config/omarchy/plugins/hancore.shibumi.ai ~/shibumi-quarantine-ai`),
+then run `./scripts/shibumi-suite repair --dry-run` followed by
+`./scripts/shibumi-suite repair --yes` if the preview is correct.
+Keep the quarantined root even if repair fails; do not delete state, manufacture
+a marker, or use this procedure for unknown identities or invalid existing markers.
 
 ## Security boundary
 
@@ -368,5 +454,4 @@ committing a transaction.
 
 Shibumi does not fetch its own source updates. For a source installation,
 update only from a trusted checkout. Package update checks are read-only and package
-installation remains owned by Omarchy/Pacman. The AUR boundary is documented in
-[packaging and AUR strategy](development/packaging.md).
+installation remains owned by Omarchy/Pacman.

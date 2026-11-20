@@ -41,11 +41,20 @@ Ui.Panel {
       bar ? bar.urgent : Commons.Color.accent)
     : (bar ? bar.urgent : Commons.Color.accent)
   readonly property var gpuTelemetry: cpuService ? cpuService.gpu : null
-  readonly property string displayMode: String(
+  // Presentation latch survives lazy panel recreation, but not owner replacement.
+  property bool gpuActivitySeen: false
+  onGpuTelemetryChanged: gpuActivitySeen = !!gpuTelemetry && gpuTelemetry.utilization > 0
+  Connections {
+    target: root.gpuTelemetry
+    function onUtilizationChanged() { if (root.gpuTelemetry.utilization > 0) root.gpuActivitySeen = true }
+  }
+  readonly property bool iconOnly: tokens.v2Shell !== true
+    && setting("displayMode", "full") === "icon-only"
+  readonly property string displayMode: iconOnly ? "icon" : String(
     setting("displayMode", setting("compact", false) ? "icon" : "full"))
   readonly property bool compact: displayMode === "icon"
-  readonly property bool percentageVisible: displayMode !== "icon"
-    || tokens.v2Shell !== true
+  readonly property bool percentageVisible: !iconOnly
+    && (displayMode !== "icon" || tokens.v2Shell !== true)
   readonly property bool v1CustomFillActive: cpuPill.v1CustomFill
   readonly property color renderedPillFillColor: cpuPill.renderedFillColor
   readonly property real renderedPillFillOpacity: cpuPill.v1FillOpacity
@@ -141,11 +150,12 @@ Ui.Panel {
   Component {
     id: horizontalContent
 
-    Row {
+    Presentation.InkRow {
       spacing: root.displayMode === "full" && root.tokens.v2Shell !== true
         ? root.tokens.contentGap : root.tokens.compactGap
 
-      Text {
+      Presentation.IconText {
+        barText: true
         visible: root.displayMode === "full" && root.tokens.v2Shell !== true
         anchors.verticalCenter: parent.verticalCenter
         text: "CPU"
@@ -164,18 +174,20 @@ Ui.Panel {
         accent: root.widgetInk
       }
 
-      Presentation.IconText {
+      Presentation.BarGlyph {
         visible: root.displayMode === "icon"
           || (root.tokens.v2Shell === true && root.displayMode === "full")
         anchors.verticalCenter: parent.verticalCenter
         text: "planner_review"
+        optical: true
         color: root.widgetInk
         font.pixelSize: root.tokens.iconSize
         font.weight: Font.DemiBold
         fill: 1
       }
 
-      Text {
+      Presentation.IconText {
+        barText: true
         // V1 Compact is the reference CPU glyph plus its live percentage,
         // not a generic icon-only mode. V2 retains its independent icon mode.
         visible: root.percentageVisible
@@ -195,7 +207,16 @@ Ui.Panel {
     Column {
       spacing: Commons.Style.space(2)
 
+      Presentation.BarGlyph {
+        visible: root.iconOnly
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: "planner_review"
+        color: root.widgetInk
+        font.pixelSize: root.tokens.iconSize
+      }
+
       Text {
+        visible: !root.iconOnly
         anchors.horizontalCenter: parent.horizontalCenter
         text: "CPU"
         color: Qt.rgba(root.widgetInk.r, root.widgetInk.g,
@@ -206,6 +227,7 @@ Ui.Panel {
       }
 
       Text {
+        visible: !root.iconOnly
         anchors.horizontalCenter: parent.horizontalCenter
         text: String(root.percent).padStart(2, "0") + "%"
         color: root.widgetInk

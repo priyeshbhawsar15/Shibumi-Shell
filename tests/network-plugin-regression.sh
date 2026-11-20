@@ -7,6 +7,9 @@ source "$repo_root/tests/lib/baselines.sh"
 shibumi_load_omarchy_baseline
 omarchy_path=$OMARCHY_PATH
 quickshell_bin=${QUICKSHELL_BIN:-/usr/bin/quickshell}
+smoke_only=${SHIBUMI_NETWORK_SMOKE_ONLY:-0}
+[[ $smoke_only == 0 || $smoke_only == 1 ]] \
+  || { printf 'network plugin regression failed: SHIBUMI_NETWORK_SMOKE_ONLY must be 0 or 1\n' >&2; exit 1; }
 tmpdir=$(mktemp -d /tmp/shibumi-network.XXXXXX)
 trap 'rm -rf -- "$tmpdir"' EXIT
 
@@ -24,8 +27,10 @@ command -v magick >/dev/null 2>&1 \
 python3 -c 'import dbus' >/dev/null 2>&1 \
   || fail "python-dbus is required for Enterprise source gates"
 
-mkdir -p "$tmpdir/runtime" "$tmpdir/fixtures" "$tmpdir/bin"
-chmod 700 "$tmpdir/runtime"
+mkdir -p "$tmpdir/runtime" "$tmpdir/fixtures" "$tmpdir/bin" \
+  "$tmpdir/home" "$tmpdir/config" "$tmpdir/cache" "$tmpdir/data"
+chmod 700 "$tmpdir/runtime" "$tmpdir/home" "$tmpdir/config" \
+  "$tmpdir/cache" "$tmpdir/data"
 shibumi_stage_suite_runtime "$repo_root" "$tmpdir"
 cp -a -- "$repo_root/hancore.shibumi.network" "$tmpdir/network"
 cp -a -- "$repo_root/hancore.shibumi.network" \
@@ -47,6 +52,12 @@ install -m 0755 \
 
 set +e
 output=$(timeout 12 env \
+  HOME="$tmpdir/home" \
+  XDG_CONFIG_HOME="$tmpdir/config" \
+  XDG_CACHE_HOME="$tmpdir/cache" \
+  XDG_DATA_HOME="$tmpdir/data" \
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$tmpdir/missing-session-bus" \
+  DBUS_SYSTEM_BUS_ADDRESS="unix:path=$tmpdir/missing-system-bus" \
   QT_QPA_PLATFORM=offscreen \
   WAYLAND_DISPLAY= \
   XDG_RUNTIME_DIR="$tmpdir/runtime" \
@@ -60,6 +71,14 @@ printf '%s\n' "$output"
 [[ $rc -eq 0 ]] || fail "component smoke exited $rc"
 grep -F 'network plugin smoke passed' <<<"$output" >/dev/null \
   || fail "success marker missing"
+if grep -Eq 'TypeError|ReferenceError|Binding loop|Unable to assign' \
+    <<<"$output"; then
+  fail "component smoke produced a QML runtime error"
+fi
+if [[ $smoke_only == 1 ]]; then
+  printf 'network plugin smoke-only regression passed\n'
+  exit 0
+fi
 
 install -m 0644 "$repo_root/tests/network-native-panel-smoke.qml" \
   "$tmpdir/shell.qml"
@@ -819,9 +838,6 @@ if rg -q 'profileSettings|\.read\(' "$native_adapter" "$native_gateway"; then
 fi
 rg -Fq 'Saved-profile removal dispatch accepted.' "$native_gateway" \
   || fail "profile removal acceptance is presented as synchronous completion"
-rg -Fq 'DBUS_SYSTEM_BUS_ADDRESS="unix:path=$tmpdir/missing-system-bus"' \
-  "$repo_root/tests/network-plugin-regression.sh" \
-  || fail "fake Network seam is not tested without the system bus"
 rg -Fq 'active: root.authorized && root.backendOverride === null' \
   "$scanner_lease" \
   || fail "native scanner gateway is not isolated behind exclusive authority"
@@ -1237,7 +1253,7 @@ if rg -q 'InlineSpeedTestRunner|omarchy-network-|\bnmcli\b' \
     "$repo_root/hancore.shibumi.network"; then
   fail "Network cutover retained a legacy Omarchy/nmcli backend"
 fi
-[[ $(rg -c 'target: "omarchy\.network"' "$bridge") -eq 1 ]] \
+[[ $(rg -c 'target: SuiteRuntime\.HostContract\.ipcTargets\.network\b' "$bridge") -eq 1 ]] \
   || fail "Network compatibility IPC does not have exactly one owner"
 if rg -q 'Loader|panelSource|panelComponent|omarchy\.wifiqr|omarchy\.speedtest' \
     "$bridge"; then
@@ -1247,7 +1263,7 @@ rg -Fq 'networkService.runSpeedTest(root) !== true' "$widget" \
   || fail "cold speed IPC clears before the native owner accepts it"
 rg -Fq 'function onSpeedTestReadyChanged()' "$widget" \
   || fail "cold speed IPC does not retry when telemetry becomes ready"
-rg -Fq 'if (!networkReady) {' "$widget" \
+rg -Fq 'if (!service || !service.ready) {' "$widget" \
   || fail "cold speed IPC is not preserved before service readiness"
 rg -Fq 'beginTrafficConsumer(root)' "$widget" \
   || fail "Ethernet bar does not acquire demand-driven telemetry"
@@ -1327,7 +1343,7 @@ for dependency in python-dbus iputils glib2 systemd; do
 done
 [[ $(rg -c 'BoundedLabel \{' "$widget") -eq 2 ]] \
   || fail "V1/V2 bounded labels do not share the independent metrics path"
-rg -Fq 'component BoundedLabel: Text' "$widget" \
+rg -Fq 'component BoundedLabel: Presentation.IconText' "$widget" \
   || fail "bounded network labels lack a reusable text component"
 rg -Fq 'TextMetrics {' "$widget" \
   || fail "bounded network labels do not use independent text metrics"
